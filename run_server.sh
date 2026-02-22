@@ -26,6 +26,6 @@ if [ "${NORD_ENABLE_UDP:-0}" = "1" ]; then
 fi
 stdbuf -oL -eL java \
   -Dnord.db.path="$DB_PATH" \
-  -Dnord.building.costs.path="$PROJECT_ROOT/building-costs.properties" \
+  -Dnord.building.costs.path="$SERVER_ROOT/building-costs.properties" \
   -cp "$CP" \
   NordServer "${SERVER_ARGS[@]}" | tee -a "$SERVER_ROOT/server.log"
