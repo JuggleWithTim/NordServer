@@ -1,6 +1,8 @@
 # NordServer
 
 Server for the online MMO Nordgame that closed down in 2014 (nordgame.com). Made by reverse engineering the client to figure out what messages the server needs to handle to allow the game to run.
+This is a fan-made project and is not affiliated with or endorsed by SkyGoblin.
+
 
 ## Feature parity and known issues
 
@@ -28,7 +30,7 @@ Server for the online MMO Nordgame that closed down in 2014 (nordgame.com). Made
 
 `run_server.sh` builds classpath from `../*.jar`, so it expects jars one directory above `NordServer/`.
 
-The game client is not included in this repo because I'm not yet sure if I'm allowed to publish it. It is the original NordGame client from back in the day with modifications to allow a custom server address. 
+The Nord client needed to connect to the server can not be distributed through Github. But we're a helpful bunch of people in the [NordRevived Discord server](https://discord.gg/NkEUkvq6vh).
 
 ## Quick Start
 
