@@ -1,6 +1,7 @@
 # NordServer
 
 Server for the online MMO Nordgame that closed down in 2014 (nordgame.com). Made by reverse engineering the client to figure out what messages the server needs to handle to allow the game to run.
+
 This is a fan-made project and is not affiliated with or endorsed by SkyGoblin.
 
 
