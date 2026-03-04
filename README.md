@@ -1,6 +1,7 @@
 # NordServer
 
 Reverse-engineered server for the original Nordgame client.
+This is a fan-made project and is not affiliated with or endorsed by SkyGoblin.
 
 This repository is intentionally **server-only**:
 - Included: Java game server, Python HTTP sidecar, Node admin panel, smoke/soak tooling.
@@ -41,6 +42,8 @@ Important scope note:
 Runtime files expected from outside this repo:
 - `../*.jar` (including `sqlite-jdbc.jar` and message model dependencies)
 - `randomseed.dat` (provide either `./randomseed.dat` or `NORD_RANDOMSEED_PATH`)
+
+We do absolutely not have any client side things on [NordRevived Discord](https://discord.gg/NkEUkvq6vh)
 
 ## Quick Start
 
