@@ -11,7 +11,7 @@ This repository is intentionally **server-only**:
 Implemented and actively used in this codebase:
 - KryoNet game server (`NordServer.java`) with TCP and optional UDP.
 - SQLite persistence layer (`NordDatabase.java`).
-- HTTP sidecar (`nord_server.py`) for client compatibility routes, forum API, uploads/share pages, and optional payment callback handling.
+- HTTP sidecar (`nord_server.py`) for client compatibility routes, forum API and uploads/share pages.
 - Live protocol smoke test and reconnect-heavy checksum soak scripts.
 - Optional admin panel for direct SQLite operations (`admin-panel/`).
 
@@ -121,17 +121,6 @@ Analyze captured logs:
 - `NORD_HTTP_TRACE_UNKNOWN`
 - `NORD_HTTP_TRACE_BODY_LIMIT`
 
-### Payment callback endpoints (HTTP sidecar)
-
-- `NORD_PAYMENTS_CALLBACK_ENABLED`
-- `NORD_PAYMENTS_CALLBACK_TOKEN`
-- `NORD_PAYMENTS_RECONCILE_TOKEN`
-- `NORD_PAYMENTS_ALLOWED_PROVIDERS`
-- `NORD_PAYMENTS_SIGNATURE_MODE`
-- `NORD_PAYMENTS_SIGNATURE_SECRET`
-- `NORD_PAYMENTS_SIGNATURE_MODE_<PROVIDER>`
-- `NORD_PAYMENTS_SIGNATURE_SECRET_<PROVIDER>`
-
 ### Smoke scripts
 
 - `NORD_SMOKE_START_SERVER`
@@ -159,10 +148,6 @@ Core compatibility routes:
 - `GET /share/<id>`
 - `GET /uploads/<id>` and `GET /dl/<id>`
 
-Payments (when enabled):
-- `POST /payments/callback/<provider>`
-- `GET /payments/reconciliation`
-- `POST /payments/reconciliation/retry`
 
 Legacy compatibility pages:
 - `/`, `/jnlp/`, `/jnlp/<filename>`, `/support.jsp`, `/tutorial.jsp`, `/Referral.jsp`, `/HamsterRedirect.jsp`, `/coins/` and provider launch pages.
