@@ -63,32 +63,6 @@ Logs:
 - `server.log` (Java)
 - `web.log` (Python)
 
-## Smoke / Soak
-
-Run smoke against an already-running server:
-
-```bash
-./run_live_smoke.sh
-```
-
-Auto-start server for smoke:
-
-```bash
-NORD_SMOKE_START_SERVER=1 ./run_live_smoke.sh
-```
-
-Run checksum soak (20 iterations by default):
-
-```bash
-./run_checksum_soak.sh
-```
-
-Analyze captured logs:
-
-```bash
-./analyze_soak_logs.sh --client-log /path/to/client.log --server-log ./server.log --web-log ./web.log
-```
-
 ## Configuration
 
 ### Core runtime
@@ -123,18 +97,6 @@ Analyze captured logs:
 - `NORD_DYNAMIC_EVENTS_XML_INLINE`
 - `NORD_HTTP_TRACE_UNKNOWN`
 - `NORD_HTTP_TRACE_BODY_LIMIT`
-
-### Smoke scripts
-
-- `NORD_SMOKE_START_SERVER`
-- `NORD_SMOKE_USE_UDP`
-- `NORD_SMOKE_HOST`
-- `NORD_SMOKE_TCP_PORT`
-- `NORD_SMOKE_UDP_PORT`
-- `NORD_SMOKE_CONNECT_TIMEOUT_MS`
-- `NORD_SMOKE_MESSAGE_TIMEOUT_MS`
-- `NORD_CHECKSUM_SOAK_RUNS`
-- `NORD_CHECKSUM_SOAK_START_SERVER`
 
 ## HTTP Endpoints (Implemented)
 
