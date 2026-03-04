@@ -816,6 +816,15 @@ public class NordServer {
             UpdateBuildingMessage m = (UpdateBuildingMessage) msg;
             NordDatabase.UserRecord user = USERS_BY_CONNECTION.get(connection.getID());
             int villageId = resolveLiveVillageId(connection, m.getVillageID());
+            if (user == null || villageId == 0) {
+                return;
+            }
+            if (villageId != user.villageId) {
+                log("[Server] Rejected cross-village UpdateBuilding write from userId=" + user.userId +
+                    " villageId=" + villageId + " homeVillageId=" + user.villageId +
+                    " buildingId=" + m.getBuildingID());
+                return;
+            }
             if (villageId != 0 && !isConnectionInVillage(connection, villageId)) {
                 joinVillage(connection, villageId);
             }
