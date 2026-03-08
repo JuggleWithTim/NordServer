@@ -49,6 +49,7 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -111,14 +112,19 @@ public class NordServer {
     private static final int ADMIN_POPUP_QUEUE_BATCH_LIMIT = 32;
     private static final long ADMIN_POPUP_QUEUE_POLL_INTERVAL_MS = 500L;
     private static final long RESOURCE_RESPAWN_SCAN_INTERVAL_MS = 1500L;
+    private static final long DEFAULT_WILD_RESOURCE_RESPAWN_DELAY_MS = TimeUnit.MINUTES.toMillis(30L);
     private static final short DEFAULT_AVATAR_POS_X = 0;
     private static final short DEFAULT_AVATAR_POS_Z = 0;
     private static final short DEFAULT_AVATAR_ROTATION = 0;
     private static final long[] INITIAL_AVATAR_MOVE_RETRY_DELAYS_MS = new long[] {350L, 1000L, 2200L};
     private static final Pattern BUILDING_TAG_PATTERN = Pattern.compile("<BUILDING\\b[^>]*>", Pattern.CASE_INSENSITIVE);
+    private static final Pattern HORSE_TAG_PATTERN = Pattern.compile("<HORSE\\b[^>]*>", Pattern.CASE_INSENSITIVE);
+    private static final Pattern PET_TAG_PATTERN = Pattern.compile("<PET\\b[^>]*>", Pattern.CASE_INSENSITIVE);
     private static final Pattern RECIPE_TAG_PATTERN = Pattern.compile("<RECIPE\\b[^>]*>", Pattern.CASE_INSENSITIVE);
     private static final Pattern ATTRIBUTE_PATTERN = Pattern.compile("(\\w+)\\s*=\\s*\"([^\"]*)\"");
     private static final Pattern CREDITS_WITH_K_PATTERN = Pattern.compile("(\\d{1,3})\\s*[kK]");
+    private static final Pattern COMPANION_PURCHASE_LOG_PATTERN =
+        Pattern.compile("companion_purchase_(mount|pet)_(\\d+)", Pattern.CASE_INSENSITIVE);
     private static final Set<String> ALLOWED_INBOUND_GENERIC_PAYLOAD_CLASSES = Collections.unmodifiableSet(new LinkedHashSet<>(Arrays.asList(
         AddServerSessionParametersMessage.class.getName(),
         BindSessionToClientMessage.class.getName(),
@@ -136,6 +142,7 @@ public class NordServer {
     private static final Map<Integer, byte[]> HEIGHTMAP_PRESET_BYTES_BY_ID = new ConcurrentHashMap<>();
     private static final Map<Integer, NordDatabase.UserRecord> USERS_BY_CONNECTION = new ConcurrentHashMap<>();
     private static final Map<Integer, Integer> SERVER_SESSION_ID_BY_CONNECTION = new ConcurrentHashMap<>();
+    private static final Map<Integer, Integer> PLAYER_ID_BY_SERVER_SESSION_ID = new ConcurrentHashMap<>();
     private static final Map<Integer, Integer> ACTIVE_VILLAGE_BY_CONNECTION = new ConcurrentHashMap<>();
     private static final Map<Integer, Map<Integer, Connection>> VILLAGE_CONNECTIONS = new ConcurrentHashMap<>();
     private static final Map<Integer, Long> LAST_RESOURCE_RESPAWN_SCAN_BY_VILLAGE = new ConcurrentHashMap<>();
@@ -162,9 +169,13 @@ public class NordServer {
     private static volatile Map<Short, TreasureType> BUILDING_TREASURE_TYPE_BY_TYPE = Collections.emptyMap();
     private static volatile Map<Short, Integer> BUILDING_REQUIRED_INGREDIENT_COUNT_BY_TYPE = Collections.emptyMap();
     private static volatile Set<Short> BUILDING_GIFT_TYPE_IDS = Collections.emptySet();
+    private static volatile Set<Short> RESOURCE_HARVEST_BUILDING_TYPE_IDS = Collections.emptySet();
+    private static volatile Map<Short, CompanionCatalogEntry> MOUNT_CATALOG_BY_TYPE = Collections.emptyMap();
+    private static volatile Map<Short, CompanionCatalogEntry> PET_CATALOG_BY_TYPE = Collections.emptyMap();
     private static volatile int LEVEL_UP_REWARD_BASE_CREDITS = DEFAULT_LEVEL_UP_REWARD_BASE_CREDITS;
     private static volatile int LEVEL_UP_REWARD_STEP_CREDITS = DEFAULT_LEVEL_UP_REWARD_STEP_CREDITS;
     private static volatile Map<String, Integer> BUY_CREDITS_AMOUNT_BY_CODE = Collections.emptyMap();
+    private static volatile long WILD_RESOURCE_RESPAWN_DELAY_MS = DEFAULT_WILD_RESOURCE_RESPAWN_DELAY_MS;
     private static volatile boolean ENABLE_BUILDINGS_CHECKSUM_RESPONSES = true;
     private static volatile boolean REQUIRE_PROVIDER_CALLBACK_BUY_CREDITS = false;
 
@@ -190,15 +201,62 @@ public class NordServer {
         final Map<Short, TreasureType> treasureTypesByType;
         final Map<Short, Integer> requiredIngredientCountsByType;
         final Set<Short> giftBuildingTypes;
+        final Set<Short> resourceHarvestBuildingTypes;
 
         private BuildingEconomyCatalog(Map<Short, Integer> pricesByType,
                                        Map<Short, TreasureType> treasureTypesByType,
                                        Map<Short, Integer> requiredIngredientCountsByType,
-                                       Set<Short> giftBuildingTypes) {
+                                       Set<Short> giftBuildingTypes,
+                                       Set<Short> resourceHarvestBuildingTypes) {
             this.pricesByType = pricesByType;
             this.treasureTypesByType = treasureTypesByType;
             this.requiredIngredientCountsByType = requiredIngredientCountsByType;
             this.giftBuildingTypes = giftBuildingTypes;
+            this.resourceHarvestBuildingTypes = resourceHarvestBuildingTypes;
+        }
+    }
+
+    private static final class CompanionCatalogEntry {
+        final String kind;
+        final short type;
+        final int price;
+        final int requiredLevel;
+        final int canBuyFromMonthDay;
+        final int canBuyToMonthDay;
+
+        private CompanionCatalogEntry(String kind,
+                                      short type,
+                                      int price,
+                                      int requiredLevel,
+                                      int canBuyFromMonthDay,
+                                      int canBuyToMonthDay) {
+            this.kind = kind;
+            this.type = type;
+            this.price = Math.max(0, price);
+            this.requiredLevel = Math.max(0, requiredLevel);
+            this.canBuyFromMonthDay = Math.max(0, canBuyFromMonthDay);
+            this.canBuyToMonthDay = Math.max(0, canBuyToMonthDay);
+        }
+    }
+
+    private static final class CompanionCatalog {
+        final Map<Short, CompanionCatalogEntry> mountsByType;
+        final Map<Short, CompanionCatalogEntry> petsByType;
+
+        private CompanionCatalog(Map<Short, CompanionCatalogEntry> mountsByType,
+                                 Map<Short, CompanionCatalogEntry> petsByType) {
+            this.mountsByType = mountsByType;
+            this.petsByType = petsByType;
+        }
+    }
+
+    private static final class CompanionPurchaseRequest {
+        final String kind;
+        final short companionType;
+
+        private CompanionPurchaseRequest(String kind, short companionType) {
+            this.kind = kind;
+            this.companionType = companionType;
         }
     }
 
@@ -332,22 +390,43 @@ public class NordServer {
         LEVEL_UP_REWARD_BASE_CREDITS = levelRewardConfig[0];
         LEVEL_UP_REWARD_STEP_CREDITS = levelRewardConfig[1];
         BUY_CREDITS_AMOUNT_BY_CODE = resolveBuyCreditsCodeMap();
+        WILD_RESOURCE_RESPAWN_DELAY_MS = resolveWildResourceRespawnDelayMs();
         ENABLE_BUILDINGS_CHECKSUM_RESPONSES = resolveBuildingsChecksumResponsesEnabled();
         REQUIRE_PROVIDER_CALLBACK_BUY_CREDITS = resolveRequireProviderCallbackBuyCredits();
         Path randomseedPath = resolveRandomseedPath();
         BuildingEconomyCatalog economyCatalog = loadBuildingEconomyCatalog(randomseedPath);
+        CompanionCatalog companionCatalog = loadCompanionCatalog(randomseedPath);
         Map<Short, Integer> buildingPrices = Collections.unmodifiableMap(new HashMap<>(economyCatalog.pricesByType));
         Map<Short, TreasureType> buildingTreasureTypes =
             Collections.unmodifiableMap(new HashMap<>(economyCatalog.treasureTypesByType));
         Map<Short, Integer> buildingRequiredIngredientCounts =
             Collections.unmodifiableMap(new HashMap<>(economyCatalog.requiredIngredientCountsByType));
         Set<Short> giftBuildingTypes = Collections.unmodifiableSet(new LinkedHashSet<>(economyCatalog.giftBuildingTypes));
+        Set<Short> resourceHarvestBuildingTypes =
+            Collections.unmodifiableSet(new LinkedHashSet<>(economyCatalog.resourceHarvestBuildingTypes));
+        Map<Short, CompanionCatalogEntry> mountCatalogByType =
+            Collections.unmodifiableMap(new HashMap<>(companionCatalog.mountsByType));
+        Map<Short, CompanionCatalogEntry> petCatalogByType =
+            Collections.unmodifiableMap(new HashMap<>(companionCatalog.petsByType));
         BUILDING_BASE_PRICE_BY_TYPE = Collections.unmodifiableMap(buildingPrices);
         BUILDING_TREASURE_TYPE_BY_TYPE = buildingTreasureTypes;
         BUILDING_REQUIRED_INGREDIENT_COUNT_BY_TYPE = buildingRequiredIngredientCounts;
         BUILDING_GIFT_TYPE_IDS = giftBuildingTypes;
+        RESOURCE_HARVEST_BUILDING_TYPE_IDS = resourceHarvestBuildingTypes;
+        MOUNT_CATALOG_BY_TYPE = mountCatalogByType;
+        PET_CATALOG_BY_TYPE = petCatalogByType;
         DATABASE.setBuildingBasePrices(buildingPrices);
         log("[Server] Loaded ingredient requirements for " + BUILDING_REQUIRED_INGREDIENT_COUNT_BY_TYPE.size() + " building type(s)");
+        log("[Server] Loaded wild resource building types: " + RESOURCE_HARVEST_BUILDING_TYPE_IDS.size() +
+            " (fallback respawn delay=" + WILD_RESOURCE_RESPAWN_DELAY_MS + "ms)");
+        try {
+            int restoredWildResources = DATABASE.restoreStuckResourceCooldownRows(RESOURCE_HARVEST_BUILDING_TYPE_IDS);
+            if (restoredWildResources > 0) {
+                log("[Server] Restored " + restoredWildResources + " stuck wild resource cooldown row(s)");
+            }
+        } catch (IOException e) {
+            log("[Server] Failed restoring stuck wild resource cooldown rows: " + e.getMessage());
+        }
 
         Log.set(Log.LEVEL_INFO);
         Server server = new Server(524288, 524288);
@@ -401,6 +480,8 @@ public class NordServer {
         if (!giftBuildingTypes.isEmpty()) {
             log("[Server] Loaded " + giftBuildingTypes.size() + " gift-enabled building definitions");
         }
+        log("[Server] Loaded companion catalog entries: mounts=" + mountCatalogByType.size() +
+            " pets=" + petCatalogByType.size());
         log("[Server] Level-up reward formula: base=" + LEVEL_UP_REWARD_BASE_CREDITS +
             " step=" + LEVEL_UP_REWARD_STEP_CREDITS +
             " (credits = base + completedLevel*step)");
@@ -861,7 +942,7 @@ public class NordServer {
                 m.getIngredients()
             ), null, true, false);
             if (user != null) {
-                rebroadcastAvatarPositionIfKnown(villageId, user.userId);
+                rebroadcastAvatarPositionIfKnown(villageId, user.userId, connection);
             }
             return;
         }
@@ -1210,7 +1291,7 @@ public class NordServer {
                 m.getDelayEndOffset(),
                 0L
             );
-            rebroadcastAvatarPositionIfKnown(villageId, user.userId);
+            rebroadcastAvatarPositionIfKnown(villageId, user.userId, connection);
             return;
         }
 
@@ -1250,7 +1331,7 @@ public class NordServer {
                 m.getDelayEndOffset(),
                 updatedIngredients
             );
-            rebroadcastAvatarPositionIfKnown(villageId, user.userId);
+            rebroadcastAvatarPositionIfKnown(villageId, user.userId, connection);
             return;
         }
 
@@ -1275,7 +1356,7 @@ public class NordServer {
                 0L,
                 null
             );
-            rebroadcastAvatarPositionIfKnown(villageId, user.userId);
+            rebroadcastAvatarPositionIfKnown(villageId, user.userId, connection);
             return;
         }
 
@@ -1886,7 +1967,72 @@ public class NordServer {
                 return;
             }
             try {
+                CompanionPurchaseRequest companionPurchase = parseCompanionPurchaseRequest(m.getLogMessage());
+                int currentCredits = DATABASE.getSLXCredits(user.userId);
+                if (companionPurchase != null) {
+                    CompanionCatalogEntry entry = resolveCompanionCatalogEntry(companionPurchase.kind, companionPurchase.companionType);
+                    if (entry == null) {
+                        connection.sendTCP(new RequestSLXCreditsResponseMessage(currentCredits));
+                        log("[Server] Rejected companion purchase spend for userId=" + user.userId +
+                            " unknown " + companionPurchase.kind + " type=" + companionPurchase.companionType);
+                        return;
+                    }
+                    if (entry.price <= 0) {
+                        connection.sendTCP(new RequestSLXCreditsResponseMessage(currentCredits));
+                        log("[Server] Ignored zero-price companion purchase spend for userId=" + user.userId +
+                            " " + companionPurchase.kind + " type=" + companionPurchase.companionType);
+                        return;
+                    }
+                    if (m.getAmount() < entry.price) {
+                        connection.sendTCP(new RequestSLXCreditsResponseMessage(currentCredits));
+                        log("[Server] Rejected companion purchase spend for userId=" + user.userId +
+                            " " + companionPurchase.kind + " type=" + companionPurchase.companionType +
+                            " amount=" + m.getAmount() + " price=" + entry.price);
+                        return;
+                    }
+                    if (user.level < entry.requiredLevel) {
+                        connection.sendTCP(new RequestSLXCreditsResponseMessage(currentCredits));
+                        log("[Server] Rejected companion purchase spend for userId=" + user.userId +
+                            " " + companionPurchase.kind + " type=" + companionPurchase.companionType +
+                            " due to level requirement " + entry.requiredLevel);
+                        return;
+                    }
+                    if (!isCompanionSeasonAvailable(entry, LocalDate.now())) {
+                        connection.sendTCP(new RequestSLXCreditsResponseMessage(currentCredits));
+                        log("[Server] Rejected companion purchase spend for userId=" + user.userId +
+                            " " + companionPurchase.kind + " type=" + companionPurchase.companionType +
+                            " outside sale window");
+                        return;
+                    }
+                    if (DATABASE.isCompanionOwned(user.userId, companionPurchase.kind, companionPurchase.companionType)) {
+                        connection.sendTCP(new RequestSLXCreditsResponseMessage(currentCredits));
+                        log("[Server] Ignored already-owned companion purchase for userId=" + user.userId +
+                            " " + companionPurchase.kind + " type=" + companionPurchase.companionType);
+                        return;
+                    }
+                    AvatarDetails currentAvatar = DATABASE.loadAvatarDetails(user.userId, user.username, user.level);
+                    short equippedType = "pet".equals(companionPurchase.kind)
+                        ? currentAvatar.getPetType()
+                        : currentAvatar.getMountType();
+                    if (equippedType == companionPurchase.companionType) {
+                        DATABASE.grantCompanionOwnership(user.userId, companionPurchase.kind, companionPurchase.companionType, "avatar_state");
+                        connection.sendTCP(new RequestSLXCreditsResponseMessage(currentCredits));
+                        log("[Server] Backfilled companion ownership for userId=" + user.userId +
+                            " " + companionPurchase.kind + " type=" + companionPurchase.companionType +
+                            " from equipped avatar state");
+                        return;
+                    }
+                    if (currentCredits < entry.price) {
+                        connection.sendTCP(new RequestSLXCreditsResponseMessage(currentCredits));
+                        log("[Server] Rejected companion purchase spend for userId=" + user.userId +
+                            " insufficient credits current=" + currentCredits + " price=" + entry.price);
+                        return;
+                    }
+                }
                 int amount = DATABASE.spendSLXCredits(user.userId, m.getAmount());
+                if (companionPurchase != null && amount < currentCredits) {
+                    DATABASE.grantCompanionOwnership(user.userId, companionPurchase.kind, companionPurchase.companionType, safe(m.getLogMessage()));
+                }
                 refreshCachedUserRecord(user.userId);
                 connection.sendTCP(new RequestSLXCreditsResponseMessage(amount));
             } catch (IOException e) {
@@ -2003,6 +2149,13 @@ public class NordServer {
             NordDatabase.UserRecord user = USERS_BY_CONNECTION.get(connection.getID());
             if (user != null) {
                 try {
+                    if (!canStoreCompanion(user, "mount", m.getMountType())) {
+                        AvatarDetails refreshed = DATABASE.loadAvatarDetails(user.userId, user.username, user.level);
+                        connection.sendTCP(new RequestAvatarDataResponseMessage(refreshed));
+                        log("[Server] Rejected unauthorized mount store for userId=" + user.userId +
+                            " mountType=" + m.getMountType());
+                        return;
+                    }
                     DATABASE.storeMount(user.userId, m.getMountType(), m.getMountName());
                 } catch (IOException e) {
                     log("[Server] Failed to store mount: " + e.getMessage());
@@ -2016,6 +2169,13 @@ public class NordServer {
             NordDatabase.UserRecord user = USERS_BY_CONNECTION.get(connection.getID());
             if (user != null) {
                 try {
+                    if (!canStoreCompanion(user, "pet", m.getPetType())) {
+                        AvatarDetails refreshed = DATABASE.loadAvatarDetails(user.userId, user.username, user.level);
+                        connection.sendTCP(new RequestAvatarDataResponseMessage(refreshed));
+                        log("[Server] Rejected unauthorized pet store for userId=" + user.userId +
+                            " petType=" + m.getPetType());
+                        return;
+                    }
                     DATABASE.storePet(user.userId, m.getPetType(), m.getPetName());
                 } catch (IOException e) {
                     log("[Server] Failed to store pet: " + e.getMessage());
@@ -2307,9 +2467,33 @@ public class NordServer {
 
         if (payload instanceof BindSessionToClientMessage) {
             BindSessionToClientMessage m = (BindSessionToClientMessage) payload;
-            if (!isValidServerSession(connection, m.getSessionID())) {
-                log("[Server] Rejected BindSessionToClientMessage due to invalid session id");
+            int requestedSessionId = m.getSessionID();
+            Integer currentSessionId = SERVER_SESSION_ID_BY_CONNECTION.get(connection.getID());
+            if (currentSessionId != null) {
+                if (currentSessionId == requestedSessionId) {
+                    return;
+                }
+                log("[Server] Rejected BindSessionToClientMessage on authenticated connection due to mismatched session id");
+                return;
             }
+            int reboundPlayerId = resolvePlayerIdForServerSession(requestedSessionId);
+            if (reboundPlayerId <= 0) {
+                log("[Server] Rejected BindSessionToClientMessage due to unknown session id");
+                return;
+            }
+            NordDatabase.UserRecord reboundUser = DATABASE.findByUserId(reboundPlayerId);
+            if (reboundUser == null) {
+                PLAYER_ID_BY_SERVER_SESSION_ID.remove(requestedSessionId);
+                log("[Server] Rejected BindSessionToClientMessage due to missing rebound user for session " + requestedSessionId);
+                return;
+            }
+            Connection existingConnection = findConnectionByPlayerId(reboundUser.userId);
+            if (existingConnection != null && existingConnection.getID() != connection.getID()) {
+                existingConnection.close();
+            }
+            USERS_BY_CONNECTION.put(connection.getID(), reboundUser);
+            SERVER_SESSION_ID_BY_CONNECTION.put(connection.getID(), requestedSessionId);
+            maybePromoteExpiredBuildingCooldowns(reboundUser.villageId);
             return;
         }
 
@@ -2508,6 +2692,27 @@ public class NordServer {
         return expectedSessionId == providedSessionId;
     }
 
+    private static int resolvePlayerIdForServerSession(int sessionId) {
+        if (sessionId <= 0) {
+            return 0;
+        }
+        Integer playerId = PLAYER_ID_BY_SERVER_SESSION_ID.get(sessionId);
+        return playerId == null ? 0 : Math.max(0, playerId);
+    }
+
+    private static void rememberServerSessionForPlayer(int sessionId, int playerId) {
+        if (sessionId <= 0 || playerId <= 0) {
+            return;
+        }
+        for (Map.Entry<Integer, Integer> entry : PLAYER_ID_BY_SERVER_SESSION_ID.entrySet()) {
+            Integer activePlayerId = entry.getValue();
+            if (activePlayerId != null && activePlayerId == playerId && entry.getKey() != sessionId) {
+                PLAYER_ID_BY_SERVER_SESSION_ID.remove(entry.getKey());
+            }
+        }
+        PLAYER_ID_BY_SERVER_SESSION_ID.put(sessionId, playerId);
+    }
+
     private static String resolveRequiredClientVersion() {
         String fromProperty = safe(System.getProperty("nord.client.version.required")).trim();
         if (!fromProperty.isEmpty()) {
@@ -2642,7 +2847,7 @@ public class NordServer {
         }
     }
 
-    private static void rebroadcastAvatarPositionIfKnown(int villageId, int playerId) {
+    private static void rebroadcastAvatarPositionIfKnown(int villageId, int playerId, Connection excludeConnection) {
         if (villageId <= 0 || playerId <= 0) {
             return;
         }
@@ -2661,8 +2866,8 @@ public class NordServer {
                 position.posZ,
                 position.rotation
             ),
-            null,
-            true,
+            excludeConnection,
+            false,
             false
         );
     }
@@ -2919,20 +3124,35 @@ public class NordServer {
         if (currentUser == null) {
             return 0;
         }
+        int sanitizedRequestedVillageId = sanitizeRequestedVillageId(connection, requestedVillageId, "resolveLiveVillageId");
         int currentVillage = sanitizeActiveVillageId(
             connection,
             ACTIVE_VILLAGE_BY_CONNECTION.getOrDefault(connection.getID(), 0),
             "resolveLiveVillageId"
         );
+
+        // Explicit village ids in write messages must match the active live village stream.
+        // Otherwise stale/out-of-order packets can mutate buildings in the wrong village.
+        if (sanitizedRequestedVillageId != 0) {
+            if (currentVillage != 0 && sanitizedRequestedVillageId != currentVillage) {
+                log("[Server] Rejected mismatched live village write from userId=" + currentUser.userId +
+                    " requestedVillageId=" + sanitizedRequestedVillageId +
+                    " activeVillageId=" + currentVillage);
+                return 0;
+            }
+            if (currentVillage == 0 && sanitizedRequestedVillageId != currentUser.villageId) {
+                log("[Server] Rejected cross-village write access from userId=" + currentUser.userId +
+                    " requestedVillageId=" + sanitizedRequestedVillageId +
+                    " homeVillageId=" + currentUser.villageId);
+                return 0;
+            }
+            maybePromoteExpiredBuildingCooldowns(sanitizedRequestedVillageId);
+            return sanitizedRequestedVillageId;
+        }
+
         if (currentVillage != 0) {
             maybePromoteExpiredBuildingCooldowns(currentVillage);
             return currentVillage;
-        }
-        int sanitizedRequestedVillageId = sanitizeRequestedVillageId(connection, requestedVillageId, "resolveLiveVillageId");
-        if (sanitizedRequestedVillageId != 0 && sanitizedRequestedVillageId != currentUser.villageId) {
-            log("[Server] Rejected cross-village write access from userId=" + currentUser.userId +
-                " requestedVillageId=" + sanitizedRequestedVillageId + " homeVillageId=" + currentUser.villageId);
-            return 0;
         }
         maybePromoteExpiredBuildingCooldowns(currentUser.villageId);
         return currentUser.villageId;
@@ -3157,6 +3377,23 @@ public class NordServer {
             if (Boolean.FALSE.equals(ready) && nextIngredients == 0L && requiredIngredientCount > 0) {
                 nextDelayStart = 0L;
                 nextDelayEnd = 0L;
+            } else if (Boolean.FALSE.equals(ready) &&
+                       requiredIngredientCount == 0 &&
+                       RESOURCE_HARVEST_BUILDING_TYPE_IDS.contains(existing.getBuildingType())) {
+                boolean hasActiveCooldown = previousDelayEnd > now && previousDelayEnd > previousDelayStart;
+                if (!hasActiveCooldown) {
+                    long fallbackOffset = Math.max(0L, delayEndOffset);
+                    if (fallbackOffset <= 0L && previousDelayEnd > previousDelayStart) {
+                        fallbackOffset = previousDelayEnd - previousDelayStart;
+                    }
+                    if (fallbackOffset <= 0L) {
+                        fallbackOffset = Math.max(0L, WILD_RESOURCE_RESPAWN_DELAY_MS);
+                    }
+                    if (fallbackOffset > 0L) {
+                        nextDelayStart = now;
+                        nextDelayEnd = safeAddMillis(now, fallbackOffset);
+                    }
+                }
             }
         }
 
@@ -3332,6 +3569,7 @@ public class NordServer {
         int playerAge = DATABASE.getPlayerAgeYears(user.userId);
         int referralId = DATABASE.getReferralId(user.userId);
         SERVER_SESSION_ID_BY_CONNECTION.put(connection.getID(), sessionId);
+        rememberServerSessionForPlayer(sessionId, user.userId);
         connection.sendTCP(new LoginResponseMessage(
             0,
             sessionId,
@@ -3853,12 +4091,15 @@ public class NordServer {
     private static BuildingEconomyCatalog loadBuildingEconomyCatalog(Path preferredPath) {
         for (Path candidate : buildPriceSourceCandidates(preferredPath)) {
             BuildingEconomyCatalog loaded = tryLoadBuildingEconomyCatalogFromPath(candidate);
-            if (!loaded.pricesByType.isEmpty() || !loaded.treasureTypesByType.isEmpty() || !loaded.giftBuildingTypes.isEmpty()) {
+            if (!loaded.pricesByType.isEmpty() ||
+                !loaded.treasureTypesByType.isEmpty() ||
+                !loaded.giftBuildingTypes.isEmpty() ||
+                !loaded.resourceHarvestBuildingTypes.isEmpty()) {
                 log("[Server] Loaded building economy data from " + candidate.toAbsolutePath());
                 return loaded;
             }
         }
-        return new BuildingEconomyCatalog(new HashMap<>(), new HashMap<>(), new HashMap<>(), new HashSet<>());
+        return new BuildingEconomyCatalog(new HashMap<>(), new HashMap<>(), new HashMap<>(), new HashSet<>(), new HashSet<>());
     }
 
     private static Set<Path> buildPriceSourceCandidates(Path preferredPath) {
@@ -3880,7 +4121,13 @@ public class NordServer {
 
     private static BuildingEconomyCatalog tryLoadBuildingEconomyCatalogFromPath(Path candidate) {
         BuildingEconomyCatalog empty =
-            new BuildingEconomyCatalog(Collections.emptyMap(), Collections.emptyMap(), Collections.emptyMap(), Collections.emptySet());
+            new BuildingEconomyCatalog(
+                Collections.emptyMap(),
+                Collections.emptyMap(),
+                Collections.emptyMap(),
+                Collections.emptySet(),
+                Collections.emptySet()
+            );
         if (candidate == null || !Files.isRegularFile(candidate)) {
             return empty;
         }
@@ -3888,7 +4135,9 @@ public class NordServer {
             byte[] rawBytes = Files.readAllBytes(candidate);
 
             BuildingEconomyCatalog plainParsed = parseBuildingEconomyCatalogFromText(new String(rawBytes, StandardCharsets.UTF_8));
-            if (!plainParsed.pricesByType.isEmpty() || !plainParsed.treasureTypesByType.isEmpty()) {
+            if (!plainParsed.pricesByType.isEmpty() ||
+                !plainParsed.treasureTypesByType.isEmpty() ||
+                !plainParsed.resourceHarvestBuildingTypes.isEmpty()) {
                 return plainParsed;
             }
 
@@ -3910,8 +4159,15 @@ public class NordServer {
         Map<Short, TreasureType> treasureTypes = new HashMap<>();
         Map<Short, Integer> requiredIngredientCounts = new HashMap<>();
         Set<Short> giftBuildingTypes = new HashSet<>();
+        Set<Short> resourceHarvestBuildingTypes = new HashSet<>();
         if (safe(text).isEmpty()) {
-            return new BuildingEconomyCatalog(prices, treasureTypes, requiredIngredientCounts, giftBuildingTypes);
+            return new BuildingEconomyCatalog(
+                prices,
+                treasureTypes,
+                requiredIngredientCounts,
+                giftBuildingTypes,
+                resourceHarvestBuildingTypes
+            );
         }
         Map<Integer, Integer> ingredientCountByRecipeId = new HashMap<>();
         Matcher recipeTagMatcher = RECIPE_TAG_PATTERN.matcher(text);
@@ -3942,6 +4198,8 @@ public class NordServer {
             TreasureType treasureType = null;
             Integer recipeId = null;
             boolean isGiftBuildingType = false;
+            boolean isResourceClickBuildingType = false;
+            boolean consumeRemovesBuilding = false;
             Matcher attrMatcher = ATTRIBUTE_PATTERN.matcher(tag);
             while (attrMatcher.find()) {
                 String key = safe(attrMatcher.group(1)).toLowerCase(Locale.ROOT);
@@ -3962,6 +4220,13 @@ public class NordServer {
                     if ("gift".equalsIgnoreCase(safe(value).trim())) {
                         isGiftBuildingType = true;
                     }
+                    if ("resource".equalsIgnoreCase(safe(value).trim())) {
+                        isResourceClickBuildingType = true;
+                    }
+                } else if ("consume".equals(key)) {
+                    if ("remove".equalsIgnoreCase(safe(value).trim())) {
+                        consumeRemovesBuilding = true;
+                    }
                 }
             }
             if (buildingType != null && basePrice != null) {
@@ -3977,8 +4242,208 @@ public class NordServer {
             if (buildingType != null && isGiftBuildingType) {
                 giftBuildingTypes.add(buildingType);
             }
+            if (buildingType != null && isResourceClickBuildingType && consumeRemovesBuilding) {
+                resourceHarvestBuildingTypes.add(buildingType);
+            }
         }
-        return new BuildingEconomyCatalog(prices, treasureTypes, requiredIngredientCounts, giftBuildingTypes);
+        return new BuildingEconomyCatalog(
+            prices,
+            treasureTypes,
+            requiredIngredientCounts,
+            giftBuildingTypes,
+            resourceHarvestBuildingTypes
+        );
+    }
+
+    private static CompanionCatalog loadCompanionCatalog(Path preferredPath) {
+        for (Path candidate : buildPriceSourceCandidates(preferredPath)) {
+            CompanionCatalog loaded = tryLoadCompanionCatalogFromPath(candidate);
+            if (!loaded.mountsByType.isEmpty() || !loaded.petsByType.isEmpty()) {
+                log("[Server] Loaded companion economy data from " + candidate.toAbsolutePath());
+                return loaded;
+            }
+        }
+        return new CompanionCatalog(Collections.emptyMap(), Collections.emptyMap());
+    }
+
+    private static CompanionCatalog tryLoadCompanionCatalogFromPath(Path candidate) {
+        CompanionCatalog empty = new CompanionCatalog(Collections.emptyMap(), Collections.emptyMap());
+        if (candidate == null || !Files.isRegularFile(candidate)) {
+            return empty;
+        }
+        try {
+            byte[] rawBytes = Files.readAllBytes(candidate);
+
+            CompanionCatalog plainParsed = parseCompanionCatalogFromText(new String(rawBytes, StandardCharsets.UTF_8));
+            if (!plainParsed.mountsByType.isEmpty() || !plainParsed.petsByType.isEmpty()) {
+                return plainParsed;
+            }
+
+            byte[] decryptedBytes;
+            try {
+                decryptedBytes = decryptRandomseedBytes(rawBytes);
+            } catch (Exception ignored) {
+                return empty;
+            }
+            return parseCompanionCatalogFromText(new String(decryptedBytes, StandardCharsets.UTF_8));
+        } catch (IOException e) {
+            log("[Server] Failed reading companion source " + candidate.toAbsolutePath() + ": " + e.getMessage());
+            return empty;
+        }
+    }
+
+    private static CompanionCatalog parseCompanionCatalogFromText(String text) {
+        Map<Short, CompanionCatalogEntry> mounts = parseCompanionCatalogEntries(text, HORSE_TAG_PATTERN, "mount");
+        Map<Short, CompanionCatalogEntry> pets = parseCompanionCatalogEntries(text, PET_TAG_PATTERN, "pet");
+        return new CompanionCatalog(mounts, pets);
+    }
+
+    private static Map<Short, CompanionCatalogEntry> parseCompanionCatalogEntries(String text,
+                                                                                  Pattern tagPattern,
+                                                                                  String kind) {
+        Map<Short, CompanionCatalogEntry> entries = new HashMap<>();
+        if (safe(text).isEmpty()) {
+            return entries;
+        }
+        Matcher tagMatcher = tagPattern.matcher(text);
+        while (tagMatcher.find()) {
+            String tag = tagMatcher.group();
+            Short companionType = null;
+            Integer price = null;
+            Integer level = null;
+            int canBuyFrom = 0;
+            int canBuyTo = 0;
+            Matcher attrMatcher = ATTRIBUTE_PATTERN.matcher(tag);
+            while (attrMatcher.find()) {
+                String key = safe(attrMatcher.group(1)).toLowerCase(Locale.ROOT);
+                String value = attrMatcher.group(2);
+                if ("id".equals(key)) {
+                    companionType = parseShortValue(value);
+                } else if ("price".equals(key)) {
+                    price = parseNonNegativeIntValue(value);
+                } else if ("level".equals(key)) {
+                    level = parseNonNegativeIntValue(value);
+                } else if ("canbuyfrom".equals(key)) {
+                    canBuyFrom = parseMonthDayToken(value);
+                } else if ("canbuyto".equals(key)) {
+                    canBuyTo = parseMonthDayToken(value);
+                }
+            }
+            if (companionType == null || companionType <= 0) {
+                continue;
+            }
+            CompanionCatalogEntry entry = new CompanionCatalogEntry(
+                kind,
+                companionType,
+                price == null ? 0 : price,
+                level == null ? 0 : level,
+                canBuyFrom,
+                canBuyTo
+            );
+            entries.put(companionType, entry);
+        }
+        return entries;
+    }
+
+    private static CompanionCatalogEntry resolveCompanionCatalogEntry(String kind, short companionType) {
+        if (companionType <= 0) {
+            return null;
+        }
+        String normalizedKind = normalizeCompanionKind(kind);
+        if ("pet".equals(normalizedKind)) {
+            return PET_CATALOG_BY_TYPE.get(companionType);
+        }
+        if ("mount".equals(normalizedKind)) {
+            return MOUNT_CATALOG_BY_TYPE.get(companionType);
+        }
+        return null;
+    }
+
+    private static CompanionPurchaseRequest parseCompanionPurchaseRequest(String logMessage) {
+        Matcher matcher = COMPANION_PURCHASE_LOG_PATTERN.matcher(safe(logMessage).trim());
+        if (!matcher.find()) {
+            return null;
+        }
+        String kind = normalizeCompanionKind(matcher.group(1));
+        Short companionType = parseShortValue(matcher.group(2));
+        if (kind.isEmpty() || companionType == null || companionType <= 0) {
+            return null;
+        }
+        return new CompanionPurchaseRequest(kind, companionType);
+    }
+
+    private static boolean canStoreCompanion(NordDatabase.UserRecord user, String kind, short companionType) {
+        if (user == null || companionType <= 0) {
+            return true;
+        }
+        CompanionCatalogEntry entry = resolveCompanionCatalogEntry(kind, companionType);
+        if (entry == null) {
+            return false;
+        }
+        if (entry.price <= 0) {
+            return true;
+        }
+        if (DATABASE.isCompanionOwned(user.userId, kind, companionType)) {
+            return true;
+        }
+        AvatarDetails currentAvatar = DATABASE.loadAvatarDetails(user.userId, user.username, user.level);
+        short equippedType = "pet".equals(normalizeCompanionKind(kind))
+            ? currentAvatar.getPetType()
+            : currentAvatar.getMountType();
+        if (equippedType == companionType) {
+            try {
+                DATABASE.grantCompanionOwnership(user.userId, kind, companionType, "avatar_state");
+            } catch (IOException ignored) {
+                // Keep the equip allowed even if ownership backfill logging fails.
+            }
+            return true;
+        }
+        return false;
+    }
+
+    private static String normalizeCompanionKind(String kind) {
+        String normalized = safe(kind).trim().toLowerCase(Locale.ROOT);
+        if ("horse".equals(normalized) || "mount".equals(normalized)) {
+            return "mount";
+        }
+        if ("pet".equals(normalized)) {
+            return "pet";
+        }
+        return "";
+    }
+
+    private static int parseMonthDayToken(String value) {
+        String normalized = safe(value).trim();
+        if (!normalized.matches("\\d{4}")) {
+            return 0;
+        }
+        Integer parsed = parseNonNegativeIntValue(normalized);
+        if (parsed == null || parsed <= 0) {
+            return 0;
+        }
+        int month = parsed / 100;
+        int day = parsed % 100;
+        if (month < 1 || month > 12 || day < 1 || day > 31) {
+            return 0;
+        }
+        return parsed;
+    }
+
+    private static boolean isCompanionSeasonAvailable(CompanionCatalogEntry entry, LocalDate today) {
+        if (entry == null) {
+            return false;
+        }
+        int from = entry.canBuyFromMonthDay;
+        int to = entry.canBuyToMonthDay;
+        if (from <= 0 || to <= 0) {
+            return true;
+        }
+        LocalDate resolvedToday = today == null ? LocalDate.now() : today;
+        int current = Math.max(0, resolvedToday.getMonthValue() * 100 + resolvedToday.getDayOfMonth());
+        if (from <= to) {
+            return current >= from && current <= to;
+        }
+        return current >= from || current <= to;
     }
 
     private static byte[] decryptRandomseedBytes(byte[] encryptedBytes) throws Exception {
@@ -4188,6 +4653,18 @@ public class NordServer {
             return DEFAULT_SMS_BUY_CREDITS_AMOUNT;
         }
         return -1;
+    }
+
+    private static long resolveWildResourceRespawnDelayMs() {
+        String raw = safe(System.getProperty("nord.wild.resource.respawn.ms")).trim();
+        if (raw.isEmpty()) {
+            raw = safe(System.getenv("NORD_WILD_RESOURCE_RESPAWN_MS")).trim();
+        }
+        Integer parsed = parseNonNegativeIntValue(raw);
+        if (parsed == null || parsed <= 0) {
+            return DEFAULT_WILD_RESOURCE_RESPAWN_DELAY_MS;
+        }
+        return parsed.longValue();
     }
 
     private static Map<String, Integer> resolveBuyCreditsCodeMap() {
@@ -4436,6 +4913,14 @@ public class NordServer {
             return Integer.MIN_VALUE;
         }
         return (int) value;
+    }
+
+    private static long safeAddMillis(long baseMillis, long offsetMillis) {
+        long normalizedOffset = Math.max(0L, offsetMillis);
+        if (Long.MAX_VALUE - baseMillis < normalizedOffset) {
+            return Long.MAX_VALUE;
+        }
+        return baseMillis + normalizedOffset;
     }
 
     private static int[] resolveLevelUpRewardConfig() {

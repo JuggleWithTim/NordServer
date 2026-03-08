@@ -330,6 +330,17 @@ def init_schema():
                 received_at INTEGER NOT NULL DEFAULT 0,
                 UNIQUE(provider, provider_event_id)
             );
+
+            CREATE TABLE IF NOT EXISTS companion_ownership (
+                player_id INTEGER NOT NULL,
+                companion_kind TEXT NOT NULL,
+                companion_type INTEGER NOT NULL,
+                acquired_at INTEGER NOT NULL DEFAULT 0,
+                source TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY(player_id, companion_kind, companion_type),
+                FOREIGN KEY(player_id) REFERENCES users(user_id) ON DELETE CASCADE
+            );
+
             """
         )
         try:
@@ -341,6 +352,10 @@ def init_schema():
         conn.execute("CREATE INDEX IF NOT EXISTS idx_payment_callbacks_received ON payment_callbacks(received_at DESC, id DESC)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_payment_callbacks_applied ON payment_callbacks(applied, received_at DESC, id DESC)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_payment_callbacks_player ON payment_callbacks(player_id, received_at DESC, id DESC)")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_companion_ownership_player "
+            "ON companion_ownership(player_id, companion_kind, companion_type)"
+        )
 
         existing_categories = conn.execute("SELECT COUNT(1) FROM forum_categories").fetchone()[0]
         if existing_categories == 0:
@@ -1186,6 +1201,25 @@ def expected_upload_checksum(player_id_text):
     return hashlib.md5((player_id_text + "thisissomerandomtext").encode("utf-8")).hexdigest()
 
 
+def presentation_picture_refs_image(picture_url, image_id):
+    url_text = str(picture_url or "").strip()
+    normalized_image_id = int(image_id or 0)
+    if url_text == "" or normalized_image_id <= 0:
+        return False
+
+    parsed = urlsplit(url_text)
+    path = (parsed.path or url_text).strip()
+    if path == "":
+        return False
+
+    suffixes = (
+        f"/dl/{normalized_image_id}",
+        f"/uploads/{normalized_image_id}",
+        f"/uploads/{normalized_image_id}.jpg",
+    )
+    return any(path.endswith(suffix) for suffix in suffixes)
+
+
 def sniff_image_type(image_bytes):
     data = image_bytes or b""
     if len(data) >= 3 and data[:3] == b"\xff\xd8\xff":
@@ -1773,13 +1807,599 @@ def retry_payment_callback(conn, provider, provider_event_id):
     return process_payment_callback(conn, callback)
 
 
+def load_companion_ownership(conn, player_id):
+    result = {
+        "playerId": max(0, int(player_id or 0)),
+        "mounts": [],
+        "pets": [],
+        "source": "companion_ownership",
+        "fetchedAt": now_ms(),
+    }
+    if result["playerId"] <= 0:
+        return result
+    try:
+        rows = conn.execute(
+            """
+            SELECT companion_kind, companion_type
+            FROM companion_ownership
+            WHERE player_id = ?
+            ORDER BY companion_kind ASC, companion_type ASC
+            """,
+            (result["playerId"],),
+        ).fetchall()
+    except sqlite3.Error:
+        result["source"] = "companion_ownership_unavailable"
+        return result
+
+    mounts = []
+    pets = []
+    for row in rows:
+        raw_kind = str(row["companion_kind"] or "").strip().lower()
+        companion_type = parse_positive_int(row["companion_type"])
+        if companion_type <= 0:
+            continue
+        if raw_kind in ("mount", "horse"):
+            if companion_type not in mounts:
+                mounts.append(companion_type)
+        elif raw_kind == "pet":
+            if companion_type not in pets:
+                pets.append(companion_type)
+    result["mounts"] = mounts
+    result["pets"] = pets
+    return result
+
+
+def normalize_report_filter_text(value, max_length=120):
+    text = str(value or "").strip()
+    if text == "":
+        return ""
+    if len(text) > max_length:
+        text = text[:max_length]
+    return text
+
+
+def report_payload_int(payload, *keys):
+    if not isinstance(payload, dict):
+        return 0
+    for key in keys:
+        if key not in payload:
+            continue
+        value = parse_positive_int(payload.get(key))
+        if value > 0:
+            return value
+    return 0
+
+
+def report_payload_text(payload, *keys, max_length=120):
+    if not isinstance(payload, dict):
+        return ""
+    for key in keys:
+        if key not in payload:
+            continue
+        value = str(payload.get(key) or "").strip()
+        if value == "":
+            continue
+        if len(value) > max_length:
+            value = value[:max_length]
+        return value
+    return ""
+
+
+def decode_report_row(entry_row):
+    raw_data = entry_row["data"]
+    if isinstance(raw_data, memoryview):
+        raw_data = raw_data.tobytes()
+    if raw_data is None:
+        raw_data = b""
+    if isinstance(raw_data, str):
+        raw_bytes = raw_data.encode("utf-8", errors="replace")
+    elif isinstance(raw_data, bytes):
+        raw_bytes = raw_data
+    else:
+        raw_bytes = bytes(raw_data)
+
+    preview_text = raw_bytes.decode("utf-8", errors="replace").replace("\r", " ").replace("\n", " ").strip()
+    if len(preview_text) > 220:
+        preview_text = preview_text[:220].rstrip() + "..."
+
+    payload = None
+    if raw_bytes and len(raw_bytes) <= 262144:
+        try:
+            parsed = json.loads(raw_bytes.decode("utf-8", errors="replace"))
+            if isinstance(parsed, dict):
+                payload = parsed
+        except Exception:
+            payload = None
+
+    payload_source = report_payload_text(payload, "source", "reportSource", "contextSource", max_length=80)
+    payload_village_id = report_payload_int(payload, "villageId", "village_id")
+    payload_village_name = report_payload_text(payload, "villageName", "village_name")
+    payload_image_id = report_payload_int(payload, "imageId", "image_id")
+    payload_event_type = report_payload_int(payload, "eventType", "event_type")
+    payload_guestbook_post_id = report_payload_int(payload, "guestbookPostId", "guestbook_post_id")
+
+    decoded_search_text = raw_bytes[:65536].decode("utf-8", errors="replace").lower()
+    if payload_source:
+        decoded_search_text = f"{decoded_search_text}\n{payload_source.lower()}"
+    if payload_village_name:
+        decoded_search_text = f"{decoded_search_text}\n{payload_village_name.lower()}"
+
+    return {
+        "reportId": int(entry_row["report_id"] or 0),
+        "reporterPlayerId": int(entry_row["player_id"] or 0),
+        "reportedPlayerId": int(entry_row["report_player_id"] or 0),
+        "reportType": int(entry_row["report_type"] or 0),
+        "dataB64": base64.b64encode(raw_bytes).decode("ascii"),
+        "dataPreview": preview_text,
+        "dataSize": len(raw_bytes),
+        "createdAt": int(entry_row["created_at"] or 0),
+        "payloadSource": payload_source,
+        "payloadVillageId": payload_village_id,
+        "payloadVillageName": payload_village_name,
+        "payloadImageId": payload_image_id,
+        "payloadEventType": payload_event_type,
+        "payloadGuestbookPostId": payload_guestbook_post_id,
+        "_searchText": decoded_search_text,
+    }
+
+
+def strip_internal_report_row_fields(entry):
+    if not isinstance(entry, dict):
+        return {}
+    return {
+        key: value
+        for key, value in entry.items()
+        if not str(key).startswith("_")
+    }
+
+
+def report_row_matches_filters(entry, query_text="", source_filter="", village_id=0, image_id=0):
+    query = str(query_text or "").strip().lower()
+    if query:
+        haystack = str(entry.get("_searchText") or "").lower()
+        if query not in haystack:
+            return False
+
+    source = str(source_filter or "").strip().lower()
+    if source:
+        payload_source = str(entry.get("payloadSource") or "").strip().lower()
+        if payload_source != source:
+            return False
+
+    normalized_village_id = max(0, int(village_id or 0))
+    if normalized_village_id > 0:
+        if int(entry.get("payloadVillageId") or 0) != normalized_village_id:
+            return False
+
+    normalized_image_id = max(0, int(image_id or 0))
+    if normalized_image_id > 0:
+        if int(entry.get("payloadImageId") or 0) != normalized_image_id:
+            return False
+
+    return True
+
+
+def load_report_history(
+    conn,
+    player_id,
+    limit,
+    offset=0,
+    reporter_player_id=0,
+    reported_player_id=0,
+    report_type=0,
+    query_text="",
+    source_filter="",
+    village_id=0,
+    image_id=0,
+    created_after=0,
+    created_before=0,
+    include_summary=False,
+):
+    normalized_player_id = max(0, int(player_id or 0))
+    normalized_limit = max(1, min(200, int(limit or 20)))
+    normalized_offset = max(0, int(offset or 0))
+    normalized_reporter_player_id = max(0, int(reporter_player_id or 0))
+    normalized_reported_player_id = max(0, int(reported_player_id or 0))
+    normalized_report_type = max(0, int(report_type or 0))
+    normalized_query_text = normalize_report_filter_text(query_text, 120)
+    normalized_source_filter = normalize_report_filter_text(source_filter, 80).lower()
+    normalized_village_id = max(0, int(village_id or 0))
+    normalized_image_id = max(0, int(image_id or 0))
+    normalized_created_after = max(0, int(created_after or 0))
+    normalized_created_before = max(0, int(created_before or 0))
+    normalized_include_summary = bool(include_summary)
+    result = {
+        "playerId": normalized_player_id,
+        "limit": normalized_limit,
+        "offset": normalized_offset,
+        "reporterPlayerId": normalized_reporter_player_id,
+        "reportedPlayerId": normalized_reported_player_id,
+        "reportType": normalized_report_type,
+        "queryText": normalized_query_text,
+        "sourceFilter": normalized_source_filter,
+        "villageIdFilter": normalized_village_id,
+        "imageIdFilter": normalized_image_id,
+        "createdAfter": normalized_created_after,
+        "createdBefore": normalized_created_before,
+        "reports": [],
+        "retrievedCount": 0,
+        "hasMore": False,
+        "nextOffset": normalized_offset,
+        "source": "report_history",
+        "fetchedAt": now_ms(),
+    }
+    if normalized_player_id <= 0:
+        return result
+    try:
+        where_parts = ["player_id = ?"]
+        params = [
+            normalized_reporter_player_id
+            if normalized_reporter_player_id > 0
+            else normalized_player_id
+        ]
+        if normalized_reported_player_id > 0:
+            where_parts.append("report_player_id = ?")
+            params.append(normalized_reported_player_id)
+        if normalized_report_type > 0:
+            where_parts.append("report_type = ?")
+            params.append(normalized_report_type)
+        if normalized_created_after > 0:
+            where_parts.append("created_at >= ?")
+            params.append(normalized_created_after)
+        if normalized_created_before > 0:
+            where_parts.append("created_at <= ?")
+            params.append(normalized_created_before)
+        base_query = f"""
+            SELECT report_id, player_id, report_player_id, report_type, data, created_at
+            FROM reports
+            WHERE {" AND ".join(where_parts)}
+            ORDER BY created_at DESC, report_id DESC
+            LIMIT ?
+            OFFSET ?
+        """
+        should_filter_by_payload = any(
+            (
+                normalized_query_text != "",
+                normalized_source_filter != "",
+                normalized_village_id > 0,
+                normalized_image_id > 0,
+            )
+        )
+        if not should_filter_by_payload:
+            rows = conn.execute(
+                base_query,
+                tuple(params + [normalized_limit + 1, normalized_offset]),
+            ).fetchall()
+            has_more = len(rows) > normalized_limit
+            visible_rows = rows[:normalized_limit]
+            for row in visible_rows:
+                result["reports"].append(strip_internal_report_row_fields(decode_report_row(row)))
+            result["retrievedCount"] = len(result["reports"])
+            result["hasMore"] = has_more
+            result["nextOffset"] = normalized_offset + len(result["reports"])
+            if normalized_include_summary:
+                total_matches_row = conn.execute(
+                    f"""
+                    SELECT COUNT(1) AS total
+                    FROM reports
+                    WHERE {" AND ".join(where_parts)}
+                    """,
+                    tuple(params),
+                ).fetchone()
+                type_rows = conn.execute(
+                    f"""
+                    SELECT report_type, COUNT(1) AS count
+                    FROM reports
+                    WHERE {" AND ".join(where_parts)}
+                    GROUP BY report_type
+                    ORDER BY count DESC, report_type ASC
+                    LIMIT 12
+                    """,
+                    tuple(params),
+                ).fetchall()
+                target_rows = conn.execute(
+                    f"""
+                    SELECT report_player_id, COUNT(1) AS count
+                    FROM reports
+                    WHERE {" AND ".join(where_parts)}
+                    GROUP BY report_player_id
+                    ORDER BY count DESC, report_player_id ASC
+                    LIMIT 12
+                    """,
+                    tuple(params),
+                ).fetchall()
+                reporter_rows = conn.execute(
+                    f"""
+                    SELECT player_id, COUNT(1) AS count
+                    FROM reports
+                    WHERE {" AND ".join(where_parts)}
+                    GROUP BY player_id
+                    ORDER BY count DESC, player_id ASC
+                    LIMIT 12
+                    """,
+                    tuple(params),
+                ).fetchall()
+                reporter_type_rows = conn.execute(
+                    f"""
+                    SELECT player_id, report_type, COUNT(1) AS count
+                    FROM reports
+                    WHERE {" AND ".join(where_parts)}
+                    GROUP BY player_id, report_type
+                    ORDER BY count DESC, player_id ASC, report_type ASC
+                    LIMIT 12
+                    """,
+                    tuple(params),
+                ).fetchall()
+                type_target_rows = conn.execute(
+                    f"""
+                    SELECT report_type, report_player_id, COUNT(1) AS count
+                    FROM reports
+                    WHERE {" AND ".join(where_parts)}
+                    GROUP BY report_type, report_player_id
+                    ORDER BY count DESC, report_type ASC, report_player_id ASC
+                    LIMIT 12
+                    """,
+                    tuple(params),
+                ).fetchall()
+                source_counts = {}
+                type_source_counts = {}
+                for entry in result["reports"]:
+                    source = str(entry.get("payloadSource") or "").strip()
+                    if source == "":
+                        source = ""
+                    report_type_key = int(entry.get("reportType") or 0)
+                    if source:
+                        source_counts[source] = source_counts.get(source, 0) + 1
+                    if report_type_key > 0 and source:
+                        type_source_key = (report_type_key, source)
+                        type_source_counts[type_source_key] = type_source_counts.get(type_source_key, 0) + 1
+                result["summary"] = {
+                    "scope": "dataset",
+                    "totalMatches": int(total_matches_row["total"] or 0),
+                    "reportTypeCounts": [
+                        {
+                            "reportType": int(row["report_type"] or 0),
+                            "count": int(row["count"] or 0),
+                        }
+                        for row in type_rows
+                        if int(row["report_type"] or 0) > 0
+                    ],
+                    "reportedPlayerCounts": [
+                        {
+                            "reportedPlayerId": int(row["report_player_id"] or 0),
+                            "count": int(row["count"] or 0),
+                        }
+                        for row in target_rows
+                        if int(row["report_player_id"] or 0) > 0
+                    ],
+                    "reporterPlayerCounts": [
+                        {
+                            "reporterPlayerId": int(row["player_id"] or 0),
+                            "count": int(row["count"] or 0),
+                        }
+                        for row in reporter_rows
+                        if int(row["player_id"] or 0) > 0
+                    ],
+                    "reporterTypeCounts": [
+                        {
+                            "reporterPlayerId": int(row["player_id"] or 0),
+                            "reportType": int(row["report_type"] or 0),
+                            "count": int(row["count"] or 0),
+                        }
+                        for row in reporter_type_rows
+                        if int(row["player_id"] or 0) > 0 and int(row["report_type"] or 0) > 0
+                    ],
+                    "payloadSourceCounts": [
+                        {
+                            "payloadSource": source,
+                            "count": int(count),
+                        }
+                        for source, count in sorted(
+                            source_counts.items(),
+                            key=lambda item: (-item[1], item[0].lower()),
+                        )[:12]
+                    ],
+                    "reportTypeTargetCounts": [
+                        {
+                            "reportType": int(row["report_type"] or 0),
+                            "reportedPlayerId": int(row["report_player_id"] or 0),
+                            "count": int(row["count"] or 0),
+                        }
+                        for row in type_target_rows
+                        if int(row["report_type"] or 0) > 0 and int(row["report_player_id"] or 0) > 0
+                    ],
+                    "reportTypeSourceCounts": [
+                        {
+                            "reportType": int(report_type),
+                            "payloadSource": source,
+                            "count": int(count),
+                        }
+                        for (report_type, source), count in sorted(
+                            type_source_counts.items(),
+                            key=lambda item: (-item[1], item[0][0], item[0][1].lower()),
+                        )[:12]
+                    ],
+                    "payloadSourceScope": "page",
+                }
+            return result
+
+        filtered_rows = []
+        scan_chunk_size = max(50, min(500, normalized_limit * 5))
+        scan_offset = 0
+        matched_before_offset = 0
+        matched_total = 0
+        has_more = False
+        summary_type_counts = {}
+        summary_target_counts = {}
+        summary_reporter_counts = {}
+        summary_source_counts = {}
+        summary_type_target_counts = {}
+        summary_type_source_counts = {}
+        summary_reporter_type_counts = {}
+        while True:
+            batch = conn.execute(
+                base_query,
+                tuple(params + [scan_chunk_size, scan_offset]),
+            ).fetchall()
+            if not batch:
+                break
+            scan_offset += len(batch)
+            for row in batch:
+                decoded = decode_report_row(row)
+                if not report_row_matches_filters(
+                    decoded,
+                    query_text=normalized_query_text,
+                    source_filter=normalized_source_filter,
+                    village_id=normalized_village_id,
+                    image_id=normalized_image_id,
+                ):
+                    continue
+                matched_total += 1
+                if normalized_include_summary:
+                    report_type_key = int(decoded.get("reportType") or 0)
+                    if report_type_key > 0:
+                        summary_type_counts[report_type_key] = summary_type_counts.get(report_type_key, 0) + 1
+                    target_key = int(decoded.get("reportedPlayerId") or 0)
+                    if target_key > 0:
+                        summary_target_counts[target_key] = summary_target_counts.get(target_key, 0) + 1
+                    reporter_key = int(decoded.get("reporterPlayerId") or 0)
+                    if reporter_key > 0:
+                        summary_reporter_counts[reporter_key] = summary_reporter_counts.get(reporter_key, 0) + 1
+                    source_key = str(decoded.get("payloadSource") or "").strip()
+                    if source_key:
+                        summary_source_counts[source_key] = summary_source_counts.get(source_key, 0) + 1
+                    if reporter_key > 0 and report_type_key > 0:
+                        reporter_type_key = (reporter_key, report_type_key)
+                        summary_reporter_type_counts[reporter_type_key] = summary_reporter_type_counts.get(reporter_type_key, 0) + 1
+                    if report_type_key > 0 and target_key > 0:
+                        type_target_key = (report_type_key, target_key)
+                        summary_type_target_counts[type_target_key] = summary_type_target_counts.get(type_target_key, 0) + 1
+                    if report_type_key > 0 and source_key:
+                        type_source_key = (report_type_key, source_key)
+                        summary_type_source_counts[type_source_key] = summary_type_source_counts.get(type_source_key, 0) + 1
+                if matched_before_offset < normalized_offset:
+                    matched_before_offset += 1
+                    continue
+                if len(filtered_rows) < normalized_limit:
+                    filtered_rows.append(decoded)
+                    continue
+                has_more = True
+                if not normalized_include_summary:
+                    break
+            if (has_more and not normalized_include_summary) or len(batch) < scan_chunk_size:
+                break
+    except sqlite3.Error:
+        result["source"] = "report_history_unavailable"
+        return result
+
+    for row in filtered_rows:
+        result["reports"].append(strip_internal_report_row_fields(row))
+    result["retrievedCount"] = len(result["reports"])
+    if normalized_include_summary:
+        result["hasMore"] = matched_total > (normalized_offset + len(result["reports"]))
+    else:
+        result["hasMore"] = has_more
+    result["nextOffset"] = normalized_offset + len(result["reports"])
+    if normalized_include_summary:
+        result["summary"] = {
+            "scope": "filtered_match_set",
+            "totalMatches": int(matched_total),
+            "reportTypeCounts": [
+                {
+                    "reportType": int(report_type),
+                    "count": int(count),
+                }
+                for report_type, count in sorted(
+                    summary_type_counts.items(),
+                    key=lambda item: (-item[1], item[0]),
+                )[:12]
+            ],
+            "reportedPlayerCounts": [
+                {
+                    "reportedPlayerId": int(reported_player_id),
+                    "count": int(count),
+                }
+                for reported_player_id, count in sorted(
+                    summary_target_counts.items(),
+                    key=lambda item: (-item[1], item[0]),
+                )[:12]
+            ],
+            "reporterPlayerCounts": [
+                {
+                    "reporterPlayerId": int(reporter_player_id),
+                    "count": int(count),
+                }
+                for reporter_player_id, count in sorted(
+                    summary_reporter_counts.items(),
+                    key=lambda item: (-item[1], item[0]),
+                )[:12]
+            ],
+            "reporterTypeCounts": [
+                {
+                    "reporterPlayerId": int(reporter_player_id),
+                    "reportType": int(report_type),
+                    "count": int(count),
+                }
+                for (reporter_player_id, report_type), count in sorted(
+                    summary_reporter_type_counts.items(),
+                    key=lambda item: (-item[1], item[0][0], item[0][1]),
+                )[:12]
+            ],
+            "payloadSourceCounts": [
+                {
+                    "payloadSource": source,
+                    "count": int(count),
+                }
+                for source, count in sorted(
+                    summary_source_counts.items(),
+                    key=lambda item: (-item[1], item[0].lower()),
+                )[:12]
+            ],
+            "reportTypeTargetCounts": [
+                {
+                    "reportType": int(report_type),
+                    "reportedPlayerId": int(reported_player_id),
+                    "count": int(count),
+                }
+                for (report_type, reported_player_id), count in sorted(
+                    summary_type_target_counts.items(),
+                    key=lambda item: (-item[1], item[0][0], item[0][1]),
+                )[:12]
+            ],
+            "reportTypeSourceCounts": [
+                {
+                    "reportType": int(report_type),
+                    "payloadSource": source,
+                    "count": int(count),
+                }
+                for (report_type, source), count in sorted(
+                    summary_type_source_counts.items(),
+                    key=lambda item: (-item[1], item[0][0], item[0][1].lower()),
+                )[:12]
+            ],
+            "payloadSourceScope": "filtered_match_set",
+        }
+    return result
+
+
 class Handler(BaseHTTPRequestHandler):
     def _send_bytes(self, status_code, body, content_type):
         self.send_response(status_code)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "*")
         self.end_headers()
         self.wfile.write(body)
+
+    def do_OPTIONS(self):
+        self.send_response(204)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "*")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
 
     def _send_text(self, status_code, text, content_type="text/plain; charset=utf-8"):
         self._send_bytes(status_code, text.encode("utf-8"), content_type)
@@ -2134,6 +2754,56 @@ class Handler(BaseHTTPRequestHandler):
             self._serve_uploaded_file(filename)
             return
 
+        if path == "/api/companion-ownership":
+            player_id = parse_positive_int(query.get("playerId", ["0"])[0])
+            try:
+                with db_connect() as conn:
+                    result = load_companion_ownership(conn, player_id)
+                self._send_json(200, result)
+            except Exception as exc:
+                self._send_json(500, {"error": str(exc)})
+            return
+
+        if path == "/api/report-history":
+            player_id = parse_positive_int(query.get("playerId", ["0"])[0])
+            limit = parse_positive_int(query.get("limit", ["20"])[0])
+            offset = parse_positive_int(query.get("offset", ["0"])[0])
+            reporter_player_id = parse_positive_int(first_query_value(query, "reporterPlayerId", "reporterId"))
+            reported_player_id = parse_positive_int(query.get("reportedPlayerId", ["0"])[0])
+            report_type = parse_positive_int(query.get("reportType", ["0"])[0])
+            query_text = first_query_value(query, "query", "search", "text")
+            source_filter = first_query_value(query, "source", "payloadSource")
+            village_id_filter = parse_positive_int(first_query_value(query, "villageId", "payloadVillageId"))
+            image_id_filter = parse_positive_int(first_query_value(query, "imageId", "payloadImageId"))
+            created_after = parse_positive_int(first_query_value(query, "createdAfter", "after"))
+            created_before = parse_positive_int(first_query_value(query, "createdBefore", "before"))
+            include_summary_raw = first_query_value(query, "includeSummary", "summary")
+            include_summary = parse_optional_bool(include_summary_raw) is True
+            if limit <= 0:
+                limit = 20
+            try:
+                with db_connect() as conn:
+                    result = load_report_history(
+                        conn,
+                        player_id,
+                        limit,
+                        offset=offset,
+                        reporter_player_id=reporter_player_id,
+                        reported_player_id=reported_player_id,
+                        report_type=report_type,
+                        query_text=query_text,
+                        source_filter=source_filter,
+                        village_id=village_id_filter,
+                        image_id=image_id_filter,
+                        created_after=created_after,
+                        created_before=created_before,
+                        include_summary=include_summary,
+                    )
+                self._send_json(200, result)
+            except Exception as exc:
+                self._send_json(500, {"error": str(exc)})
+            return
+
         if path == "/payments/reconciliation":
             if not PAYMENTS_CALLBACK_ENABLED:
                 self.send_error(404, "Not found")
@@ -2351,6 +3021,18 @@ class Handler(BaseHTTPRequestHandler):
                         return
 
                     conn.execute("DELETE FROM uploaded_pictures WHERE id = ?", (image_id,))
+                    profile_row = conn.execute(
+                        "SELECT presentation_picture_url FROM account_profiles WHERE player_id = ?",
+                        (player_id,),
+                    ).fetchone()
+                    if profile_row and presentation_picture_refs_image(
+                        profile_row["presentation_picture_url"],
+                        image_id,
+                    ):
+                        conn.execute(
+                            "UPDATE account_profiles SET presentation_picture_url = '' WHERE player_id = ?",
+                            (player_id,),
+                        )
 
                     upload_root = os.path.abspath(UPLOAD_DIR)
                     for raw_path in (row["image_path"], row["thumbnail_path"]):

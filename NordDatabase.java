@@ -25,6 +25,7 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Set;
 import java.time.LocalDate;
 import java.time.Period;
 import javax.crypto.SecretKeyFactory;
@@ -136,6 +137,20 @@ public class NordDatabase {
             this.category = category;
             this.type = type;
             this.value = value;
+        }
+    }
+
+    public static final class CompanionOwnershipRecord {
+        public final String companionKind;
+        public final short companionType;
+        public final long acquiredAt;
+        public final String source;
+
+        private CompanionOwnershipRecord(String companionKind, short companionType, long acquiredAt, String source) {
+            this.companionKind = companionKind;
+            this.companionType = companionType;
+            this.acquiredAt = acquiredAt;
+            this.source = source;
         }
     }
 
@@ -1004,6 +1019,45 @@ public class NordDatabase {
         }
     }
 
+    public synchronized int restoreStuckResourceCooldownRows(Set<Short> resourceBuildingTypes) throws IOException {
+        if (resourceBuildingTypes == null || resourceBuildingTypes.isEmpty()) {
+            return 0;
+        }
+        ArrayList<Short> normalizedTypes = new ArrayList<>();
+        for (Short buildingType : resourceBuildingTypes) {
+            if (buildingType == null) {
+                continue;
+            }
+            normalizedTypes.add(buildingType);
+        }
+        if (normalizedTypes.isEmpty()) {
+            return 0;
+        }
+
+        StringBuilder sql = new StringBuilder(
+            "UPDATE buildings SET ready = 1, delay_start = 0, delay_end = 0 " +
+            "WHERE ready = 0 AND delay_end = 0 AND consumed = 0 AND building_type IN ("
+        );
+        for (int i = 0; i < normalizedTypes.size(); i++) {
+            if (i > 0) {
+                sql.append(',');
+            }
+            sql.append('?');
+        }
+        sql.append(')');
+
+        try (Connection connection = openConnection();
+             PreparedStatement statement = connection.prepareStatement(sql.toString())) {
+            int index = 1;
+            for (Short buildingType : normalizedTypes) {
+                statement.setShort(index++, buildingType);
+            }
+            return statement.executeUpdate();
+        } catch (SQLException e) {
+            throw new IOException("Failed to restore stuck resource cooldown rows", e);
+        }
+    }
+
     public synchronized Short loadBuildingType(int villageId, short buildingId) throws IOException {
         String sql = "SELECT building_type FROM buildings WHERE village_id = ? AND building_id = ?";
         try (Connection connection = openConnection();
@@ -1658,6 +1712,96 @@ public class NordDatabase {
 
     public synchronized void storePet(int playerId, short petType, String petName) throws IOException {
         upsertAvatarState(playerId, null, null, null, petType, safe(petName));
+    }
+
+    public synchronized void grantCompanionOwnership(int playerId,
+                                                     String companionKind,
+                                                     short companionType,
+                                                     String source) throws IOException {
+        String normalizedKind = normalizeCompanionKind(companionKind);
+        if (playerId <= 0 || normalizedKind.isEmpty() || companionType <= 0) {
+            return;
+        }
+        String sql =
+            "INSERT INTO companion_ownership (player_id, companion_kind, companion_type, acquired_at, source) " +
+            "VALUES (?, ?, ?, ?, ?) " +
+            "ON CONFLICT(player_id, companion_kind, companion_type) DO UPDATE SET " +
+            "acquired_at = CASE " +
+            "  WHEN companion_ownership.acquired_at <= 0 THEN excluded.acquired_at " +
+            "  ELSE MIN(companion_ownership.acquired_at, excluded.acquired_at) " +
+            "END, " +
+            "source = CASE " +
+            "  WHEN excluded.source = '' THEN companion_ownership.source " +
+            "  WHEN companion_ownership.source = '' THEN excluded.source " +
+            "  ELSE companion_ownership.source " +
+            "END";
+        try (Connection connection = openConnection();
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setInt(1, playerId);
+            statement.setString(2, normalizedKind);
+            statement.setInt(3, companionType);
+            statement.setLong(4, System.currentTimeMillis());
+            statement.setString(5, safe(source));
+            statement.executeUpdate();
+        } catch (SQLException e) {
+            throw new IOException("Failed to grant companion ownership", e);
+        }
+    }
+
+    public synchronized boolean isCompanionOwned(int playerId, String companionKind, short companionType) {
+        String normalizedKind = normalizeCompanionKind(companionKind);
+        if (playerId <= 0 || normalizedKind.isEmpty() || companionType <= 0) {
+            return companionType <= 0;
+        }
+        String sql =
+            "SELECT 1 FROM companion_ownership " +
+            "WHERE player_id = ? AND companion_kind = ? AND companion_type = ? " +
+            "LIMIT 1";
+        try (Connection connection = openConnection();
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setInt(1, playerId);
+            statement.setString(2, normalizedKind);
+            statement.setInt(3, companionType);
+            try (ResultSet rs = statement.executeQuery()) {
+                return rs.next();
+            }
+        } catch (SQLException ignored) {
+            return false;
+        }
+    }
+
+    public synchronized Map<String, ArrayList<Integer>> loadCompanionOwnership(int playerId) {
+        HashMap<String, ArrayList<Integer>> result = new HashMap<>();
+        result.put("mount", new ArrayList<>());
+        result.put("pet", new ArrayList<>());
+        if (playerId <= 0) {
+            return result;
+        }
+        String sql =
+            "SELECT companion_kind, companion_type " +
+            "FROM companion_ownership " +
+            "WHERE player_id = ? " +
+            "ORDER BY companion_kind ASC, companion_type ASC";
+        try (Connection connection = openConnection();
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setInt(1, playerId);
+            try (ResultSet rs = statement.executeQuery()) {
+                while (rs.next()) {
+                    String normalizedKind = normalizeCompanionKind(rs.getString("companion_kind"));
+                    int companionType = rs.getInt("companion_type");
+                    if (normalizedKind.isEmpty() || companionType <= 0) {
+                        continue;
+                    }
+                    ArrayList<Integer> list = result.computeIfAbsent(normalizedKind, ignored -> new ArrayList<>());
+                    if (!list.contains(companionType)) {
+                        list.add(companionType);
+                    }
+                }
+            }
+        } catch (SQLException ignored) {
+            return result;
+        }
+        return result;
     }
 
     public synchronized boolean updateVillageName(int playerId, String villageName) throws IOException {
@@ -2477,6 +2621,21 @@ public class NordDatabase {
                 ")"
             );
             statement.execute(
+                "CREATE TABLE IF NOT EXISTS companion_ownership (" +
+                "player_id INTEGER NOT NULL, " +
+                "companion_kind TEXT NOT NULL, " +
+                "companion_type INTEGER NOT NULL, " +
+                "acquired_at INTEGER NOT NULL DEFAULT 0, " +
+                "source TEXT NOT NULL DEFAULT '', " +
+                "PRIMARY KEY(player_id, companion_kind, companion_type), " +
+                "FOREIGN KEY(player_id) REFERENCES users(user_id) ON DELETE CASCADE" +
+                ")"
+            );
+            statement.execute(
+                "CREATE INDEX IF NOT EXISTS idx_companion_ownership_player " +
+                "ON companion_ownership(player_id, companion_kind, companion_type)"
+            );
+            statement.execute(
                 "CREATE TABLE IF NOT EXISTS player_clothes (" +
                 "player_id INTEGER NOT NULL, " +
                 "cloth_id INTEGER NOT NULL, " +
@@ -2796,6 +2955,17 @@ public class NordDatabase {
 
     private static String safe(String value) {
         return value == null ? "" : value;
+    }
+
+    private static String normalizeCompanionKind(String companionKind) {
+        String normalized = safe(companionKind).trim().toLowerCase();
+        if ("mount".equals(normalized) || "horse".equals(normalized)) {
+            return "mount";
+        }
+        if ("pet".equals(normalized)) {
+            return "pet";
+        }
+        return "";
     }
 
     private static String normalizeChatCommandPermission(String permission) {
