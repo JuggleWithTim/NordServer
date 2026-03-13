@@ -816,6 +816,7 @@ public class LiveProtocolSmoke {
         for (int attempt = 1; attempt <= maxAttempts; attempt++) {
             Client client = new Client(524_288, 524_288);
             JGNMessages.registerJGNMessageClasses(client.getKryo());
+            registerMissingPointWalkMessageClasses(client.getKryo());
             MessagePump pump = new MessagePump();
             client.addListener(pump);
             client.start();
@@ -845,6 +846,45 @@ public class LiveProtocolSmoke {
             throw lastRuntimeException;
         }
         throw new IOException("Unable to connect smoke client");
+    }
+
+    private static void registerMissingPointWalkMessageClasses(com.esotericsoftware.kryo.Kryo kryo) {
+        kryo.register(
+            RequestPointWalkQuestionStatisticsMessage.class,
+            new com.esotericsoftware.kryo.serialize.FieldSerializer(kryo, RequestPointWalkQuestionStatisticsMessage.class)
+        );
+        kryo.register(
+            RequestPointWalkVillageAnswersForPlayerMessage.class,
+            new com.esotericsoftware.kryo.serialize.FieldSerializer(kryo, RequestPointWalkVillageAnswersForPlayerMessage.class)
+        );
+        kryo.register(
+            RequestPointWalkVillageHighscoreMessage.class,
+            new com.esotericsoftware.kryo.serialize.FieldSerializer(kryo, RequestPointWalkVillageHighscoreMessage.class)
+        );
+        kryo.register(
+            StorePointWalkAnswerMessage.class,
+            new com.esotericsoftware.kryo.serialize.FieldSerializer(kryo, StorePointWalkAnswerMessage.class)
+        );
+        kryo.register(
+            RemoveAllPointWalkAnswersInOwnVillageMessage.class,
+            new com.esotericsoftware.kryo.serialize.FieldSerializer(kryo, RemoveAllPointWalkAnswersInOwnVillageMessage.class)
+        );
+        kryo.register(
+            RequestPointWalkQuestionStatisticsResponseMessage.class,
+            new com.esotericsoftware.kryo.serialize.FieldSerializer(kryo, RequestPointWalkQuestionStatisticsResponseMessage.class)
+        );
+        kryo.register(
+            RequestPointWalkVillageAnswersForPlayerResponseMessage.class,
+            new com.esotericsoftware.kryo.serialize.FieldSerializer(kryo, RequestPointWalkVillageAnswersForPlayerResponseMessage.class)
+        );
+        kryo.register(
+            RequestPointWalkVillageHighscoreResponseMessage.class,
+            new com.esotericsoftware.kryo.serialize.FieldSerializer(kryo, RequestPointWalkVillageHighscoreResponseMessage.class)
+        );
+        kryo.register(
+            PointWalkAnswersRemovedNotificationMessage.class,
+            new com.esotericsoftware.kryo.serialize.FieldSerializer(kryo, PointWalkAnswersRemovedNotificationMessage.class)
+        );
     }
 
     private static void closeClient(SmokeClient smokeClient) {

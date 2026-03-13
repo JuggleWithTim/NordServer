@@ -1917,12 +1917,30 @@ def decode_report_row(entry_row):
     payload_image_id = report_payload_int(payload, "imageId", "image_id")
     payload_event_type = report_payload_int(payload, "eventType", "event_type")
     payload_guestbook_post_id = report_payload_int(payload, "guestbookPostId", "guestbook_post_id")
+    payload_forum_id = report_payload_int(payload, "forumId", "forum_id")
+    payload_forum_name = report_payload_text(payload, "forumName", "forum_name")
+    payload_thread_id = report_payload_int(payload, "threadId", "thread_id")
+    payload_thread_name = report_payload_text(payload, "threadName", "thread_name")
+    payload_forum_message_id = report_payload_int(
+        payload,
+        "forumMessageId",
+        "forum_message_id",
+        "messageId",
+        "message_id",
+    )
+    payload_share_id = report_payload_int(payload, "shareId", "share_id")
+    payload_share_type = report_payload_int(payload, "shareType", "share_type")
+    payload_share_data = report_payload_int(payload, "shareData", "share_data")
 
     decoded_search_text = raw_bytes[:65536].decode("utf-8", errors="replace").lower()
     if payload_source:
         decoded_search_text = f"{decoded_search_text}\n{payload_source.lower()}"
     if payload_village_name:
         decoded_search_text = f"{decoded_search_text}\n{payload_village_name.lower()}"
+    if payload_forum_name:
+        decoded_search_text = f"{decoded_search_text}\n{payload_forum_name.lower()}"
+    if payload_thread_name:
+        decoded_search_text = f"{decoded_search_text}\n{payload_thread_name.lower()}"
 
     return {
         "reportId": int(entry_row["report_id"] or 0),
@@ -1939,6 +1957,14 @@ def decode_report_row(entry_row):
         "payloadImageId": payload_image_id,
         "payloadEventType": payload_event_type,
         "payloadGuestbookPostId": payload_guestbook_post_id,
+        "payloadForumId": payload_forum_id,
+        "payloadForumName": payload_forum_name,
+        "payloadThreadId": payload_thread_id,
+        "payloadThreadName": payload_thread_name,
+        "payloadForumMessageId": payload_forum_message_id,
+        "payloadShareId": payload_share_id,
+        "payloadShareType": payload_share_type,
+        "payloadShareData": payload_share_data,
         "_searchText": decoded_search_text,
     }
 
@@ -1977,6 +2003,318 @@ def report_row_matches_filters(entry, query_text="", source_filter="", village_i
             return False
 
     return True
+
+
+def remember_report_thread_summary_context(summary_context, entry):
+    if not isinstance(summary_context, dict) or not isinstance(entry, dict):
+        return
+    thread_id = max(0, int(entry.get("payloadThreadId") or 0))
+    if thread_id <= 0:
+        return
+    thread_context = summary_context.setdefault("threads", {})
+    current = dict(thread_context.get(thread_id) or {})
+    forum_id = max(0, int(entry.get("payloadForumId") or 0))
+    forum_name = str(entry.get("payloadForumName") or "").strip()
+    thread_name = str(entry.get("payloadThreadName") or "").strip()
+    message_id = max(0, int(entry.get("payloadForumMessageId") or 0))
+    reported_player_id = max(0, int(entry.get("reportedPlayerId") or 0))
+    village_id = max(0, int(entry.get("payloadVillageId") or 0))
+    village_name = str(entry.get("payloadVillageName") or "").strip()
+    image_id = max(0, int(entry.get("payloadImageId") or 0))
+    if forum_id > 0 and int(current.get("payloadForumId") or 0) <= 0:
+        current["payloadForumId"] = forum_id
+    if forum_name and not str(current.get("payloadForumName") or "").strip():
+        current["payloadForumName"] = forum_name
+    if thread_name and not str(current.get("payloadThreadName") or "").strip():
+        current["payloadThreadName"] = thread_name
+    if message_id > 0 and int(current.get("payloadForumMessageId") or 0) <= 0:
+        current["payloadForumMessageId"] = message_id
+    if reported_player_id > 0 and int(current.get("reportedPlayerId") or 0) <= 0:
+        current["reportedPlayerId"] = reported_player_id
+    if village_id > 0 and int(current.get("payloadVillageId") or 0) <= 0:
+        current["payloadVillageId"] = village_id
+    if village_name and not str(current.get("payloadVillageName") or "").strip():
+        current["payloadVillageName"] = village_name
+    if image_id > 0 and int(current.get("payloadImageId") or 0) <= 0:
+        current["payloadImageId"] = image_id
+    thread_context[thread_id] = current
+
+
+def remember_report_share_summary_context(summary_context, entry):
+    if not isinstance(summary_context, dict) or not isinstance(entry, dict):
+        return
+    share_id = max(0, int(entry.get("payloadShareId") or 0))
+    if share_id <= 0:
+        return
+    share_context = summary_context.setdefault("shares", {})
+    current = dict(share_context.get(share_id) or {})
+    share_type = max(0, int(entry.get("payloadShareType") or 0))
+    share_data = max(0, int(entry.get("payloadShareData") or 0))
+    share_player_id = max(0, int(entry.get("sharePlayerId") or entry.get("payloadSharePlayerId") or 0))
+    village_id = max(0, int(entry.get("payloadVillageId") or 0))
+    village_name = str(entry.get("payloadVillageName") or "").strip()
+    image_id = max(0, int(entry.get("payloadImageId") or 0))
+    if share_type > 0 and int(current.get("payloadShareType") or 0) <= 0:
+        current["payloadShareType"] = share_type
+    if share_data > 0 and int(current.get("payloadShareData") or 0) <= 0:
+        current["payloadShareData"] = share_data
+    if share_player_id > 0 and int(current.get("sharePlayerId") or 0) <= 0:
+        current["sharePlayerId"] = share_player_id
+    if village_id > 0 and int(current.get("payloadVillageId") or 0) <= 0:
+        current["payloadVillageId"] = village_id
+    if village_name and not str(current.get("payloadVillageName") or "").strip():
+        current["payloadVillageName"] = village_name
+    if image_id > 0 and int(current.get("payloadImageId") or 0) <= 0:
+        current["payloadImageId"] = image_id
+    share_context[share_id] = current
+
+
+def hydrate_report_share_summary_context(conn, summary_context):
+    if not isinstance(summary_context, dict):
+        return
+    share_context = summary_context.get("shares")
+    if not isinstance(share_context, dict) or not share_context:
+        return
+    share_ids = [int(share_id) for share_id in share_context.keys() if int(share_id or 0) > 0]
+    if not share_ids:
+        return
+    placeholders = ",".join("?" for _ in share_ids)
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT share_id, player_id, share_type, share_data, created_at
+            FROM shares
+            WHERE share_id IN ({placeholders})
+            """,
+            tuple(share_ids),
+        ).fetchall()
+    except sqlite3.Error:
+        return
+    for row in rows:
+        share_id = max(0, int(row["share_id"] or 0))
+        if share_id <= 0:
+            continue
+        current = dict(share_context.get(share_id) or {})
+        player_id = max(0, int(row["player_id"] or 0))
+        share_type = max(0, int(row["share_type"] or 0))
+        share_data = max(0, int(row["share_data"] or 0))
+        created_at = max(0, int(row["created_at"] or 0))
+        if player_id > 0:
+            current["sharePlayerId"] = player_id
+        if share_type > 0:
+            current["payloadShareType"] = share_type
+        if share_data > 0:
+            current["payloadShareData"] = share_data
+        if created_at > 0:
+            current["shareCreatedAt"] = created_at
+        share_context[share_id] = current
+
+
+def hydrate_report_share_context_for_entries(conn, entries):
+    if not isinstance(entries, list) or not entries:
+        return
+    share_ids = sorted({
+        max(0, int(entry.get("payloadShareId") or 0))
+        for entry in entries
+        if isinstance(entry, dict)
+    })
+    share_ids = [share_id for share_id in share_ids if share_id > 0]
+    if not share_ids:
+        return
+    placeholders = ",".join("?" for _ in share_ids)
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT share_id, player_id, share_type, share_data, created_at
+            FROM shares
+            WHERE share_id IN ({placeholders})
+            """,
+            tuple(share_ids),
+        ).fetchall()
+    except sqlite3.Error:
+        return
+    share_rows = {
+        max(0, int(row["share_id"] or 0)): row
+        for row in rows
+        if max(0, int(row["share_id"] or 0)) > 0
+    }
+    if not share_rows:
+        return
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        share_id = max(0, int(entry.get("payloadShareId") or 0))
+        if share_id <= 0:
+            continue
+        row = share_rows.get(share_id)
+        if row is None:
+            continue
+        if int(entry.get("sharePlayerId") or 0) <= 0:
+            entry["sharePlayerId"] = max(0, int(row["player_id"] or 0))
+        if int(entry.get("payloadShareType") or 0) <= 0:
+            entry["payloadShareType"] = max(0, int(row["share_type"] or 0))
+        if int(entry.get("payloadShareData") or 0) <= 0:
+            entry["payloadShareData"] = max(0, int(row["share_data"] or 0))
+        if int(entry.get("shareCreatedAt") or 0) <= 0:
+            entry["shareCreatedAt"] = max(0, int(row["created_at"] or 0))
+
+
+def build_thread_summary_entry(thread_id, count, summary_context):
+    entry = {
+        "payloadThreadId": int(thread_id),
+        "count": int(count),
+    }
+    thread_context = {}
+    if isinstance(summary_context, dict):
+        thread_context = summary_context.get("threads", {}).get(int(thread_id), {}) or {}
+    forum_id = max(0, int(thread_context.get("payloadForumId") or 0))
+    forum_name = str(thread_context.get("payloadForumName") or "").strip()
+    thread_name = str(thread_context.get("payloadThreadName") or "").strip()
+    message_id = max(0, int(thread_context.get("payloadForumMessageId") or 0))
+    reported_player_id = max(0, int(thread_context.get("reportedPlayerId") or 0))
+    village_id = max(0, int(thread_context.get("payloadVillageId") or 0))
+    village_name = str(thread_context.get("payloadVillageName") or "").strip()
+    image_id = max(0, int(thread_context.get("payloadImageId") or 0))
+    if forum_id > 0:
+        entry["payloadForumId"] = forum_id
+    if forum_name:
+        entry["payloadForumName"] = forum_name
+    if thread_name:
+        entry["payloadThreadName"] = thread_name
+    if message_id > 0:
+        entry["payloadForumMessageId"] = message_id
+    if reported_player_id > 0:
+        entry["reportedPlayerId"] = reported_player_id
+    if village_id > 0:
+        entry["payloadVillageId"] = village_id
+    if village_name:
+        entry["payloadVillageName"] = village_name
+    if image_id > 0:
+        entry["payloadImageId"] = image_id
+    return entry
+
+
+def build_share_summary_entry(share_id, count, summary_context):
+    entry = {
+        "payloadShareId": int(share_id),
+        "count": int(count),
+    }
+    share_context = {}
+    if isinstance(summary_context, dict):
+        share_context = summary_context.get("shares", {}).get(int(share_id), {}) or {}
+    share_player_id = max(0, int(share_context.get("sharePlayerId") or share_context.get("playerId") or 0))
+    share_type = max(0, int(share_context.get("payloadShareType") or share_context.get("shareType") or 0))
+    share_data = max(0, int(share_context.get("payloadShareData") or share_context.get("shareData") or 0))
+    share_created_at = max(0, int(share_context.get("shareCreatedAt") or 0))
+    village_id = max(0, int(share_context.get("payloadVillageId") or 0))
+    village_name = str(share_context.get("payloadVillageName") or "").strip()
+    image_id = max(0, int(share_context.get("payloadImageId") or 0))
+    if share_player_id > 0:
+        entry["sharePlayerId"] = share_player_id
+    if share_type > 0:
+        entry["payloadShareType"] = share_type
+    if share_data > 0:
+        entry["payloadShareData"] = share_data
+    if share_created_at > 0:
+        entry["shareCreatedAt"] = share_created_at
+    if village_id > 0:
+        entry["payloadVillageId"] = village_id
+    if village_name:
+        entry["payloadVillageName"] = village_name
+    if image_id > 0:
+        entry["payloadImageId"] = image_id
+    return entry
+
+
+def load_share_history(
+    conn,
+    player_id,
+    limit,
+    offset=0,
+    share_id=0,
+    share_type=0,
+    share_data=0,
+    created_after=0,
+    created_before=0,
+):
+    normalized_player_id = max(0, int(player_id or 0))
+    normalized_limit = max(1, min(100, int(limit or 10)))
+    normalized_offset = max(0, int(offset or 0))
+    normalized_share_id = max(0, int(share_id or 0))
+    normalized_share_type = max(0, int(share_type or 0))
+    normalized_share_data = max(0, int(share_data or 0))
+    normalized_created_after = max(0, int(created_after or 0))
+    normalized_created_before = max(0, int(created_before or 0))
+    result = {
+        "playerId": normalized_player_id,
+        "limit": normalized_limit,
+        "offset": normalized_offset,
+        "shareId": normalized_share_id,
+        "shareType": normalized_share_type,
+        "shareData": normalized_share_data,
+        "createdAfter": normalized_created_after,
+        "createdBefore": normalized_created_before,
+        "shares": [],
+        "retrievedCount": 0,
+        "hasMore": False,
+        "nextOffset": normalized_offset,
+        "source": "share_history",
+        "fetchedAt": now_ms(),
+    }
+    if normalized_player_id <= 0 and normalized_share_id <= 0:
+        return result
+
+    where_parts = []
+    params = []
+    if normalized_share_id > 0:
+        where_parts.append("share_id = ?")
+        params.append(normalized_share_id)
+    elif normalized_player_id > 0:
+        where_parts.append("player_id = ?")
+        params.append(normalized_player_id)
+    if normalized_share_type > 0:
+        where_parts.append("share_type = ?")
+        params.append(normalized_share_type)
+    if normalized_share_data > 0:
+        where_parts.append("share_data = ?")
+        params.append(normalized_share_data)
+    if normalized_created_after > 0:
+        where_parts.append("created_at >= ?")
+        params.append(normalized_created_after)
+    if normalized_created_before > 0:
+        where_parts.append("created_at <= ?")
+        params.append(normalized_created_before)
+
+    rows = conn.execute(
+        f"""
+        SELECT share_id, player_id, share_type, share_data, created_at
+        FROM shares
+        WHERE {" AND ".join(where_parts)}
+        ORDER BY created_at DESC, share_id DESC
+        LIMIT ?
+        OFFSET ?
+        """,
+        tuple(params + [normalized_limit + 1, normalized_offset]),
+    ).fetchall()
+    has_more = len(rows) > normalized_limit
+    visible_rows = rows[:normalized_limit]
+    for row in visible_rows:
+        row_player_id = int(row["player_id"] or 0)
+        if result["playerId"] <= 0 and row_player_id > 0:
+            result["playerId"] = row_player_id
+        result["shares"].append(
+            {
+                "shareId": int(row["share_id"]),
+                "playerId": row_player_id,
+                "shareType": int(row["share_type"]),
+                "shareData": int(row["share_data"]),
+                "createdAt": int(row["created_at"]),
+            }
+        )
+    result["retrievedCount"] = len(result["shares"])
+    result["hasMore"] = has_more
+    result["nextOffset"] = normalized_offset + len(result["shares"])
+    return result
 
 
 def load_report_history(
@@ -2074,6 +2412,7 @@ def load_report_history(
             visible_rows = rows[:normalized_limit]
             for row in visible_rows:
                 result["reports"].append(strip_internal_report_row_fields(decode_report_row(row)))
+            hydrate_report_share_context_for_entries(conn, result["reports"])
             result["retrievedCount"] = len(result["reports"])
             result["hasMore"] = has_more
             result["nextOffset"] = normalized_offset + len(result["reports"])
@@ -2143,16 +2482,64 @@ def load_report_history(
                 ).fetchall()
                 source_counts = {}
                 type_source_counts = {}
+                type_village_counts = {}
+                type_image_counts = {}
+                thread_counts = {}
+                share_counts = {}
+                type_thread_counts = {}
+                type_share_counts = {}
+                reporter_village_counts = {}
+                reporter_image_counts = {}
+                village_counts = {}
+                image_counts = {}
+                summary_context = {
+                    "threads": {},
+                    "shares": {},
+                }
                 for entry in result["reports"]:
                     source = str(entry.get("payloadSource") or "").strip()
                     if source == "":
                         source = ""
+                    reporter_key = int(entry.get("reporterPlayerId") or 0)
                     report_type_key = int(entry.get("reportType") or 0)
+                    village_key = int(entry.get("payloadVillageId") or 0)
+                    image_key = int(entry.get("payloadImageId") or 0)
+                    thread_key = int(entry.get("payloadThreadId") or 0)
+                    share_key = int(entry.get("payloadShareId") or 0)
                     if source:
                         source_counts[source] = source_counts.get(source, 0) + 1
+                    if village_key > 0:
+                        village_counts[village_key] = village_counts.get(village_key, 0) + 1
+                    if image_key > 0:
+                        image_counts[image_key] = image_counts.get(image_key, 0) + 1
+                    if thread_key > 0:
+                        thread_counts[thread_key] = thread_counts.get(thread_key, 0) + 1
+                        remember_report_thread_summary_context(summary_context, entry)
+                    if share_key > 0:
+                        share_counts[share_key] = share_counts.get(share_key, 0) + 1
+                        remember_report_share_summary_context(summary_context, entry)
                     if report_type_key > 0 and source:
                         type_source_key = (report_type_key, source)
                         type_source_counts[type_source_key] = type_source_counts.get(type_source_key, 0) + 1
+                    if report_type_key > 0 and village_key > 0:
+                        type_village_key = (report_type_key, village_key)
+                        type_village_counts[type_village_key] = type_village_counts.get(type_village_key, 0) + 1
+                    if report_type_key > 0 and image_key > 0:
+                        type_image_key = (report_type_key, image_key)
+                        type_image_counts[type_image_key] = type_image_counts.get(type_image_key, 0) + 1
+                    if report_type_key > 0 and thread_key > 0:
+                        type_thread_key = (report_type_key, thread_key)
+                        type_thread_counts[type_thread_key] = type_thread_counts.get(type_thread_key, 0) + 1
+                    if report_type_key > 0 and share_key > 0:
+                        type_share_key = (report_type_key, share_key)
+                        type_share_counts[type_share_key] = type_share_counts.get(type_share_key, 0) + 1
+                    if reporter_key > 0 and village_key > 0:
+                        reporter_village_key = (reporter_key, village_key)
+                        reporter_village_counts[reporter_village_key] = reporter_village_counts.get(reporter_village_key, 0) + 1
+                    if reporter_key > 0 and image_key > 0:
+                        reporter_image_key = (reporter_key, image_key)
+                        reporter_image_counts[reporter_image_key] = reporter_image_counts.get(reporter_image_key, 0) + 1
+                hydrate_report_share_summary_context(conn, summary_context)
                 result["summary"] = {
                     "scope": "dataset",
                     "totalMatches": int(total_matches_row["total"] or 0),
@@ -2199,6 +2586,40 @@ def load_report_history(
                             key=lambda item: (-item[1], item[0].lower()),
                         )[:12]
                     ],
+                    "payloadVillageCounts": [
+                        {
+                            "payloadVillageId": int(village_id),
+                            "count": int(count),
+                        }
+                        for village_id, count in sorted(
+                            village_counts.items(),
+                            key=lambda item: (-item[1], item[0]),
+                        )[:12]
+                    ],
+                    "payloadImageCounts": [
+                        {
+                            "payloadImageId": int(image_id),
+                            "count": int(count),
+                        }
+                        for image_id, count in sorted(
+                            image_counts.items(),
+                            key=lambda item: (-item[1], item[0]),
+                        )[:12]
+                    ],
+                    "payloadThreadCounts": [
+                        build_thread_summary_entry(thread_id, count, summary_context)
+                        for thread_id, count in sorted(
+                            thread_counts.items(),
+                            key=lambda item: (-item[1], item[0]),
+                        )[:12]
+                    ],
+                    "payloadShareCounts": [
+                        build_share_summary_entry(share_id, count, summary_context)
+                        for share_id, count in sorted(
+                            share_counts.items(),
+                            key=lambda item: (-item[1], item[0]),
+                        )[:12]
+                    ],
                     "reportTypeTargetCounts": [
                         {
                             "reportType": int(row["report_type"] or 0),
@@ -2219,6 +2640,70 @@ def load_report_history(
                             key=lambda item: (-item[1], item[0][0], item[0][1].lower()),
                         )[:12]
                     ],
+                    "reportTypeVillageCounts": [
+                        {
+                            "reportType": int(report_type),
+                            "payloadVillageId": int(village_id),
+                            "count": int(count),
+                        }
+                        for (report_type, village_id), count in sorted(
+                            type_village_counts.items(),
+                            key=lambda item: (-item[1], item[0][0], item[0][1]),
+                        )[:12]
+                    ],
+                    "reportTypeImageCounts": [
+                        {
+                            "reportType": int(report_type),
+                            "payloadImageId": int(image_id),
+                            "count": int(count),
+                        }
+                        for (report_type, image_id), count in sorted(
+                            type_image_counts.items(),
+                            key=lambda item: (-item[1], item[0][0], item[0][1]),
+                        )[:12]
+                    ],
+                    "reportTypeThreadCounts": [
+                        {
+                            **build_thread_summary_entry(thread_id, count, summary_context),
+                            "reportType": int(report_type),
+                        }
+                        for (report_type, thread_id), count in sorted(
+                            type_thread_counts.items(),
+                            key=lambda item: (-item[1], item[0][0], item[0][1]),
+                        )[:12]
+                    ],
+                    "reportTypeShareCounts": [
+                        {
+                            **build_share_summary_entry(share_id, count, summary_context),
+                            "reportType": int(report_type),
+                        }
+                        for (report_type, share_id), count in sorted(
+                            type_share_counts.items(),
+                            key=lambda item: (-item[1], item[0][0], item[0][1]),
+                        )[:12]
+                    ],
+                    "reporterVillageCounts": [
+                        {
+                            "reporterPlayerId": int(reporter_player_id),
+                            "payloadVillageId": int(village_id),
+                            "count": int(count),
+                        }
+                        for (reporter_player_id, village_id), count in sorted(
+                            reporter_village_counts.items(),
+                            key=lambda item: (-item[1], item[0][0], item[0][1]),
+                        )[:12]
+                    ],
+                    "reporterImageCounts": [
+                        {
+                            "reporterPlayerId": int(reporter_player_id),
+                            "payloadImageId": int(image_id),
+                            "count": int(count),
+                        }
+                        for (reporter_player_id, image_id), count in sorted(
+                            reporter_image_counts.items(),
+                            key=lambda item: (-item[1], item[0][0], item[0][1]),
+                        )[:12]
+                    ],
                     "payloadSourceScope": "page",
                 }
             return result
@@ -2233,9 +2718,23 @@ def load_report_history(
         summary_target_counts = {}
         summary_reporter_counts = {}
         summary_source_counts = {}
+        summary_village_counts = {}
+        summary_image_counts = {}
+        summary_thread_counts = {}
+        summary_share_counts = {}
         summary_type_target_counts = {}
         summary_type_source_counts = {}
+        summary_type_village_counts = {}
+        summary_type_image_counts = {}
+        summary_type_thread_counts = {}
+        summary_type_share_counts = {}
         summary_reporter_type_counts = {}
+        summary_reporter_village_counts = {}
+        summary_reporter_image_counts = {}
+        summary_context = {
+            "threads": {},
+            "shares": {},
+        }
         while True:
             batch = conn.execute(
                 base_query,
@@ -2268,6 +2767,20 @@ def load_report_history(
                     source_key = str(decoded.get("payloadSource") or "").strip()
                     if source_key:
                         summary_source_counts[source_key] = summary_source_counts.get(source_key, 0) + 1
+                    village_key = int(decoded.get("payloadVillageId") or 0)
+                    if village_key > 0:
+                        summary_village_counts[village_key] = summary_village_counts.get(village_key, 0) + 1
+                    image_key = int(decoded.get("payloadImageId") or 0)
+                    if image_key > 0:
+                        summary_image_counts[image_key] = summary_image_counts.get(image_key, 0) + 1
+                    thread_key = int(decoded.get("payloadThreadId") or 0)
+                    if thread_key > 0:
+                        summary_thread_counts[thread_key] = summary_thread_counts.get(thread_key, 0) + 1
+                        remember_report_thread_summary_context(summary_context, decoded)
+                    share_key = int(decoded.get("payloadShareId") or 0)
+                    if share_key > 0:
+                        summary_share_counts[share_key] = summary_share_counts.get(share_key, 0) + 1
+                        remember_report_share_summary_context(summary_context, decoded)
                     if reporter_key > 0 and report_type_key > 0:
                         reporter_type_key = (reporter_key, report_type_key)
                         summary_reporter_type_counts[reporter_type_key] = summary_reporter_type_counts.get(reporter_type_key, 0) + 1
@@ -2277,6 +2790,24 @@ def load_report_history(
                     if report_type_key > 0 and source_key:
                         type_source_key = (report_type_key, source_key)
                         summary_type_source_counts[type_source_key] = summary_type_source_counts.get(type_source_key, 0) + 1
+                    if report_type_key > 0 and village_key > 0:
+                        type_village_key = (report_type_key, village_key)
+                        summary_type_village_counts[type_village_key] = summary_type_village_counts.get(type_village_key, 0) + 1
+                    if report_type_key > 0 and image_key > 0:
+                        type_image_key = (report_type_key, image_key)
+                        summary_type_image_counts[type_image_key] = summary_type_image_counts.get(type_image_key, 0) + 1
+                    if report_type_key > 0 and thread_key > 0:
+                        type_thread_key = (report_type_key, thread_key)
+                        summary_type_thread_counts[type_thread_key] = summary_type_thread_counts.get(type_thread_key, 0) + 1
+                    if report_type_key > 0 and share_key > 0:
+                        type_share_key = (report_type_key, share_key)
+                        summary_type_share_counts[type_share_key] = summary_type_share_counts.get(type_share_key, 0) + 1
+                    if reporter_key > 0 and village_key > 0:
+                        reporter_village_key = (reporter_key, village_key)
+                        summary_reporter_village_counts[reporter_village_key] = summary_reporter_village_counts.get(reporter_village_key, 0) + 1
+                    if reporter_key > 0 and image_key > 0:
+                        reporter_image_key = (reporter_key, image_key)
+                        summary_reporter_image_counts[reporter_image_key] = summary_reporter_image_counts.get(reporter_image_key, 0) + 1
                 if matched_before_offset < normalized_offset:
                     matched_before_offset += 1
                     continue
@@ -2292,6 +2823,7 @@ def load_report_history(
         result["source"] = "report_history_unavailable"
         return result
 
+    hydrate_report_share_context_for_entries(conn, filtered_rows)
     for row in filtered_rows:
         result["reports"].append(strip_internal_report_row_fields(row))
     result["retrievedCount"] = len(result["reports"])
@@ -2301,6 +2833,7 @@ def load_report_history(
         result["hasMore"] = has_more
     result["nextOffset"] = normalized_offset + len(result["reports"])
     if normalized_include_summary:
+        hydrate_report_share_summary_context(conn, summary_context)
         result["summary"] = {
             "scope": "filtered_match_set",
             "totalMatches": int(matched_total),
@@ -2355,6 +2888,40 @@ def load_report_history(
                     key=lambda item: (-item[1], item[0].lower()),
                 )[:12]
             ],
+            "payloadVillageCounts": [
+                {
+                    "payloadVillageId": int(village_id),
+                    "count": int(count),
+                }
+                for village_id, count in sorted(
+                    summary_village_counts.items(),
+                    key=lambda item: (-item[1], item[0]),
+                )[:12]
+            ],
+            "payloadImageCounts": [
+                {
+                    "payloadImageId": int(image_id),
+                    "count": int(count),
+                }
+                for image_id, count in sorted(
+                    summary_image_counts.items(),
+                    key=lambda item: (-item[1], item[0]),
+                )[:12]
+            ],
+            "payloadThreadCounts": [
+                build_thread_summary_entry(thread_id, count, summary_context)
+                for thread_id, count in sorted(
+                    summary_thread_counts.items(),
+                    key=lambda item: (-item[1], item[0]),
+                )[:12]
+            ],
+            "payloadShareCounts": [
+                build_share_summary_entry(share_id, count, summary_context)
+                for share_id, count in sorted(
+                    summary_share_counts.items(),
+                    key=lambda item: (-item[1], item[0]),
+                )[:12]
+            ],
             "reportTypeTargetCounts": [
                 {
                     "reportType": int(report_type),
@@ -2375,6 +2942,70 @@ def load_report_history(
                 for (report_type, source), count in sorted(
                     summary_type_source_counts.items(),
                     key=lambda item: (-item[1], item[0][0], item[0][1].lower()),
+                )[:12]
+            ],
+            "reportTypeVillageCounts": [
+                {
+                    "reportType": int(report_type),
+                    "payloadVillageId": int(village_id),
+                    "count": int(count),
+                }
+                for (report_type, village_id), count in sorted(
+                    summary_type_village_counts.items(),
+                    key=lambda item: (-item[1], item[0][0], item[0][1]),
+                )[:12]
+            ],
+            "reportTypeImageCounts": [
+                {
+                    "reportType": int(report_type),
+                    "payloadImageId": int(image_id),
+                    "count": int(count),
+                }
+                for (report_type, image_id), count in sorted(
+                    summary_type_image_counts.items(),
+                    key=lambda item: (-item[1], item[0][0], item[0][1]),
+                )[:12]
+            ],
+            "reportTypeThreadCounts": [
+                {
+                    **build_thread_summary_entry(thread_id, count, summary_context),
+                    "reportType": int(report_type),
+                }
+                for (report_type, thread_id), count in sorted(
+                    summary_type_thread_counts.items(),
+                    key=lambda item: (-item[1], item[0][0], item[0][1]),
+                )[:12]
+            ],
+            "reportTypeShareCounts": [
+                {
+                    **build_share_summary_entry(share_id, count, summary_context),
+                    "reportType": int(report_type),
+                }
+                for (report_type, share_id), count in sorted(
+                    summary_type_share_counts.items(),
+                    key=lambda item: (-item[1], item[0][0], item[0][1]),
+                )[:12]
+            ],
+            "reporterVillageCounts": [
+                {
+                    "reporterPlayerId": int(reporter_player_id),
+                    "payloadVillageId": int(village_id),
+                    "count": int(count),
+                }
+                for (reporter_player_id, village_id), count in sorted(
+                    summary_reporter_village_counts.items(),
+                    key=lambda item: (-item[1], item[0][0], item[0][1]),
+                )[:12]
+            ],
+            "reporterImageCounts": [
+                {
+                    "reporterPlayerId": int(reporter_player_id),
+                    "payloadImageId": int(image_id),
+                    "count": int(count),
+                }
+                for (reporter_player_id, image_id), count in sorted(
+                    summary_reporter_image_counts.items(),
+                    key=lambda item: (-item[1], item[0][0], item[0][1]),
                 )[:12]
             ],
             "payloadSourceScope": "filtered_match_set",
@@ -2798,6 +3429,35 @@ class Handler(BaseHTTPRequestHandler):
                         created_after=created_after,
                         created_before=created_before,
                         include_summary=include_summary,
+                    )
+                self._send_json(200, result)
+            except Exception as exc:
+                self._send_json(500, {"error": str(exc)})
+            return
+
+        if path == "/api/share-history":
+            player_id = parse_positive_int(query.get("playerId", ["0"])[0])
+            limit = parse_positive_int(query.get("limit", ["10"])[0])
+            offset = parse_positive_int(query.get("offset", ["0"])[0])
+            share_id = parse_positive_int(first_query_value(query, "shareId", "id"))
+            share_type = parse_positive_int(first_query_value(query, "shareType", "type"))
+            share_data = parse_positive_int(first_query_value(query, "shareData", "data"))
+            created_after = parse_positive_int(first_query_value(query, "createdAfter", "after"))
+            created_before = parse_positive_int(first_query_value(query, "createdBefore", "before"))
+            if limit <= 0:
+                limit = 10
+            try:
+                with db_connect() as conn:
+                    result = load_share_history(
+                        conn,
+                        player_id,
+                        limit,
+                        offset=offset,
+                        share_id=share_id,
+                        share_type=share_type,
+                        share_data=share_data,
+                        created_after=created_after,
+                        created_before=created_before,
                     )
                 self._send_json(200, result)
             except Exception as exc:

@@ -24,6 +24,7 @@ import java.util.Base64;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
 import java.time.LocalDate;
@@ -33,6 +34,8 @@ import javax.crypto.spec.PBEKeySpec;
 
 public class NordDatabase {
     private static final int HEIGHTMAP_PRESET_COUNT = 50;
+    private static final int DEFAULT_VILLAGE_THEME = 0;
+    private static final int DEFAULT_VILLAGE_BOUNDS_SIZE = 6;
     private static final int PASSWORD_PBKDF2_ITERATIONS = 120000;
     private static final int PASSWORD_SALT_BYTES = 16;
     private static final int PASSWORD_HASH_BYTES = 32;
@@ -75,6 +78,18 @@ public class NordDatabase {
             this.success = success;
             this.usernameTaken = usernameTaken;
             this.user = user;
+        }
+    }
+
+    public static final class ResourcePlacement {
+        public final byte tileX;
+        public final byte tileZ;
+        public final byte rotation;
+
+        public ResourcePlacement(byte tileX, byte tileZ, byte rotation) {
+            this.tileX = tileX;
+            this.tileZ = tileZ;
+            this.rotation = rotation;
         }
     }
 
@@ -951,18 +966,21 @@ public class NordDatabase {
 
     public synchronized ArrayList<Building> promoteExpiredBuildingCooldowns(int villageId,
                                                                             long nowMillis,
-                                                                            Map<Short, Integer> requiredIngredientCountsByBuildingType) throws IOException {
+                                                                            Map<Short, Integer> requiredIngredientCountsByBuildingType,
+                                                                            Set<Short> resourceBuildingTypes) throws IOException {
         ArrayList<Building> promoted = new ArrayList<>();
         if (villageId <= 0) {
             return promoted;
         }
         Map<Short, Integer> requiredIngredients =
             requiredIngredientCountsByBuildingType != null ? requiredIngredientCountsByBuildingType : Collections.emptyMap();
+        Set<Short> normalizedResourceTypes =
+            resourceBuildingTypes != null ? resourceBuildingTypes : Collections.emptySet();
         long cutoff = Math.max(0L, nowMillis);
         String selectSql =
             "SELECT building_id, building_type, remaining_points, tile_x, tile_z, parameters, rotation, consumed, placed_on_map, delay_start, delay_end, ingredients " +
             "FROM buildings WHERE village_id = ? AND ready = 0 AND delay_end > 0 AND delay_end <= ? ORDER BY building_id";
-        String updateSql = "UPDATE buildings SET ready = 1 WHERE village_id = ? AND building_id = ? AND ready = 0";
+        String updateSql = "UPDATE buildings SET ready = 1, consumed = ? WHERE village_id = ? AND building_id = ? AND ready = 0";
 
         try (Connection connection = openConnection()) {
             boolean previousAutoCommit = connection.getAutoCommit();
@@ -979,6 +997,10 @@ public class NordDatabase {
                         if (!hasAllRequiredIngredientBits(ingredients, requiredIngredientCount)) {
                             continue;
                         }
+                        boolean consumed = rs.getInt("consumed") != 0;
+                        if (consumed && normalizedResourceTypes.contains(buildingType)) {
+                            consumed = false;
+                        }
                         promoted.add(new Building(
                             (short) rs.getInt("building_id"),
                             buildingType,
@@ -987,7 +1009,7 @@ public class NordDatabase {
                             (byte) rs.getInt("tile_z"),
                             nullableBytes(rs.getBytes("parameters")),
                             (byte) rs.getInt("rotation"),
-                            rs.getInt("consumed") != 0,
+                            consumed,
                             rs.getInt("placed_on_map") != 0,
                             true,
                             rs.getLong("delay_start"),
@@ -998,8 +1020,9 @@ public class NordDatabase {
                 }
 
                 for (Building building : promoted) {
-                    updateStatement.setInt(1, villageId);
-                    updateStatement.setShort(2, building.getBuildingID());
+                    updateStatement.setInt(1, building.isConsumed() ? 1 : 0);
+                    updateStatement.setInt(2, villageId);
+                    updateStatement.setShort(3, building.getBuildingID());
                     updateStatement.addBatch();
                 }
                 if (!promoted.isEmpty()) {
@@ -1035,8 +1058,8 @@ public class NordDatabase {
         }
 
         StringBuilder sql = new StringBuilder(
-            "UPDATE buildings SET ready = 1, delay_start = 0, delay_end = 0 " +
-            "WHERE ready = 0 AND delay_end = 0 AND consumed = 0 AND building_type IN ("
+            "UPDATE buildings SET ready = 1, delay_start = 0, delay_end = 0, consumed = 0 " +
+            "WHERE ready = 0 AND delay_end = 0 AND building_type IN ("
         );
         for (int i = 0; i < normalizedTypes.size(); i++) {
             if (i > 0) {
@@ -1058,6 +1081,90 @@ public class NordDatabase {
         }
     }
 
+    public synchronized ArrayList<Building> restoreStuckResourceCooldownRowsInVillage(int villageId,
+                                                                                      Set<Short> resourceBuildingTypes) throws IOException {
+        ArrayList<Building> restored = new ArrayList<>();
+        if (villageId <= 0 || resourceBuildingTypes == null || resourceBuildingTypes.isEmpty()) {
+            return restored;
+        }
+        ArrayList<Short> normalizedTypes = new ArrayList<>();
+        for (Short buildingType : resourceBuildingTypes) {
+            if (buildingType == null) {
+                continue;
+            }
+            normalizedTypes.add(buildingType);
+        }
+        if (normalizedTypes.isEmpty()) {
+            return restored;
+        }
+
+        StringBuilder selectSql = new StringBuilder(
+            "SELECT building_id, building_type, remaining_points, tile_x, tile_z, parameters, rotation, consumed, placed_on_map, ingredients " +
+            "FROM buildings WHERE village_id = ? AND ready = 0 AND delay_end = 0 AND building_type IN ("
+        );
+        StringBuilder updateSql = new StringBuilder(
+            "UPDATE buildings SET ready = 1, delay_start = 0, delay_end = 0, consumed = 0 " +
+            "WHERE village_id = ? AND building_id = ? AND ready = 0 AND delay_end = 0"
+        );
+        for (int i = 0; i < normalizedTypes.size(); i++) {
+            if (i > 0) {
+                selectSql.append(',');
+            }
+            selectSql.append('?');
+        }
+        selectSql.append(") ORDER BY building_id");
+
+        try (Connection connection = openConnection()) {
+            boolean previousAutoCommit = connection.getAutoCommit();
+            connection.setAutoCommit(false);
+            try (PreparedStatement selectStatement = connection.prepareStatement(selectSql.toString());
+                 PreparedStatement updateStatement = connection.prepareStatement(updateSql.toString())) {
+                int index = 1;
+                selectStatement.setInt(index++, villageId);
+                for (Short buildingType : normalizedTypes) {
+                    selectStatement.setShort(index++, buildingType);
+                }
+                try (ResultSet rs = selectStatement.executeQuery()) {
+                    while (rs.next()) {
+                        restored.add(new Building(
+                            (short) rs.getInt("building_id"),
+                            (short) rs.getInt("building_type"),
+                            rs.getFloat("remaining_points"),
+                            (byte) rs.getInt("tile_x"),
+                            (byte) rs.getInt("tile_z"),
+                            nullableBytes(rs.getBytes("parameters")),
+                            (byte) rs.getInt("rotation"),
+                            false,
+                            rs.getInt("placed_on_map") != 0,
+                            true,
+                            0L,
+                            0L,
+                            rs.getLong("ingredients")
+                        ));
+                    }
+                }
+
+                for (Building building : restored) {
+                    updateStatement.setInt(1, villageId);
+                    updateStatement.setShort(2, building.getBuildingID());
+                    updateStatement.addBatch();
+                }
+                if (!restored.isEmpty()) {
+                    updateStatement.executeBatch();
+                }
+                connection.commit();
+                return restored;
+            } catch (SQLException e) {
+                connection.rollback();
+                throw e;
+            } finally {
+                connection.setAutoCommit(previousAutoCommit);
+            }
+        } catch (SQLException e) {
+            throw new IOException("Failed to restore stuck resource cooldown rows in village", e);
+        }
+    }
+
     public synchronized Short loadBuildingType(int villageId, short buildingId) throws IOException {
         String sql = "SELECT building_type FROM buildings WHERE village_id = ? AND building_id = ?";
         try (Connection connection = openConnection();
@@ -1072,6 +1179,173 @@ public class NordDatabase {
             }
         } catch (SQLException e) {
             throw new IOException("Failed to load building type", e);
+        }
+    }
+
+    public synchronized ArrayList<ResourcePlacement> loadResourcePlacementsForType(short buildingType) {
+        ArrayList<ResourcePlacement> placements = new ArrayList<>();
+        if (buildingType <= 0) {
+            return placements;
+        }
+        String templateVillageSql =
+            "SELECT village_id FROM buildings " +
+            "WHERE building_type = ? AND placed_on_map = 1 " +
+            "GROUP BY village_id " +
+            "ORDER BY COUNT(*) DESC, village_id ASC LIMIT 1";
+        String placementsSql =
+            "SELECT tile_x, tile_z, rotation FROM buildings " +
+            "WHERE village_id = ? AND building_type = ? AND placed_on_map = 1 " +
+            "ORDER BY building_id";
+        try (Connection connection = openConnection();
+             PreparedStatement templateVillageStatement = connection.prepareStatement(templateVillageSql)) {
+            templateVillageStatement.setShort(1, buildingType);
+            int templateVillageId = 0;
+            try (ResultSet rs = templateVillageStatement.executeQuery()) {
+                if (rs.next()) {
+                    templateVillageId = rs.getInt("village_id");
+                }
+            }
+            if (templateVillageId <= 0) {
+                return placements;
+            }
+            try (PreparedStatement placementsStatement = connection.prepareStatement(placementsSql)) {
+                placementsStatement.setInt(1, templateVillageId);
+                placementsStatement.setShort(2, buildingType);
+                try (ResultSet rs = placementsStatement.executeQuery()) {
+                    while (rs.next()) {
+                        placements.add(new ResourcePlacement(
+                            (byte) rs.getInt("tile_x"),
+                            (byte) rs.getInt("tile_z"),
+                            (byte) rs.getInt("rotation")
+                        ));
+                    }
+                }
+            }
+        } catch (SQLException ignored) {
+            // Keep empty fallback.
+        }
+        return placements;
+    }
+
+    public synchronized ArrayList<Building> seedVillageWildResourcesIfMissing(int villageId,
+                                                                               short resourceBuildingType,
+                                                                               ArrayList<ResourcePlacement> placements,
+                                                                               Set<Short> allResourceBuildingTypes) throws IOException {
+        ArrayList<Building> seeded = new ArrayList<>();
+        if (villageId <= 0 || resourceBuildingType <= 0 || placements == null || placements.isEmpty()) {
+            return seeded;
+        }
+        ArrayList<Short> normalizedTypes = new ArrayList<>();
+        if (allResourceBuildingTypes != null) {
+            for (Short type : allResourceBuildingTypes) {
+                if (type == null || type <= 0) {
+                    continue;
+                }
+                normalizedTypes.add(type);
+            }
+        }
+        if (normalizedTypes.isEmpty()) {
+            normalizedTypes.add(resourceBuildingType);
+        }
+        StringBuilder existsSql = new StringBuilder(
+            "SELECT 1 FROM buildings WHERE village_id = ? AND building_type IN ("
+        );
+        for (int i = 0; i < normalizedTypes.size(); i++) {
+            if (i > 0) {
+                existsSql.append(',');
+            }
+            existsSql.append('?');
+        }
+        existsSql.append(") LIMIT 1");
+        String usedIdsSql = "SELECT building_id FROM buildings WHERE village_id = ?";
+        String insertSql =
+            "INSERT INTO buildings (village_id, building_id, building_type, remaining_points, tile_x, tile_z, parameters, rotation, consumed, placed_on_map, ready, delay_start, delay_end, ingredients) " +
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+
+        try (Connection connection = openConnection()) {
+            boolean previousAutoCommit = connection.getAutoCommit();
+            connection.setAutoCommit(false);
+            try (PreparedStatement existsStatement = connection.prepareStatement(existsSql.toString())) {
+                int existsIndex = 1;
+                existsStatement.setInt(existsIndex++, villageId);
+                for (Short type : normalizedTypes) {
+                    existsStatement.setShort(existsIndex++, type);
+                }
+                try (ResultSet rs = existsStatement.executeQuery()) {
+                    if (rs.next()) {
+                        connection.commit();
+                        return seeded;
+                    }
+                }
+            }
+
+            HashSet<Short> usedIds = new HashSet<>();
+            try (PreparedStatement usedIdsStatement = connection.prepareStatement(usedIdsSql)) {
+                usedIdsStatement.setInt(1, villageId);
+                try (ResultSet rs = usedIdsStatement.executeQuery()) {
+                    while (rs.next()) {
+                        int rawId = rs.getInt("building_id");
+                        if (rawId < Short.MIN_VALUE || rawId > Short.MAX_VALUE) {
+                            continue;
+                        }
+                        usedIds.add((short) rawId);
+                    }
+                }
+            }
+
+            short candidate = Short.MIN_VALUE;
+            try (PreparedStatement insertStatement = connection.prepareStatement(insertSql)) {
+                for (ResourcePlacement placement : placements) {
+                    while (usedIds.contains(candidate) && candidate < Short.MAX_VALUE) {
+                        candidate++;
+                    }
+                    if (usedIds.contains(candidate)) {
+                        break;
+                    }
+                    short buildingId = candidate;
+                    usedIds.add(buildingId);
+                    insertStatement.setInt(1, villageId);
+                    insertStatement.setShort(2, buildingId);
+                    insertStatement.setShort(3, resourceBuildingType);
+                    insertStatement.setFloat(4, 0f);
+                    insertStatement.setInt(5, placement.tileX);
+                    insertStatement.setInt(6, placement.tileZ);
+                    insertStatement.setBytes(7, null);
+                    insertStatement.setInt(8, placement.rotation);
+                    insertStatement.setInt(9, 0);
+                    insertStatement.setInt(10, 1);
+                    insertStatement.setInt(11, 1);
+                    insertStatement.setLong(12, 0L);
+                    insertStatement.setLong(13, 0L);
+                    insertStatement.setLong(14, 0L);
+                    insertStatement.addBatch();
+                    seeded.add(new Building(
+                        buildingId,
+                        resourceBuildingType,
+                        0f,
+                        placement.tileX,
+                        placement.tileZ,
+                        null,
+                        placement.rotation,
+                        false,
+                        true,
+                        true,
+                        0L,
+                        0L,
+                        0L
+                    ));
+                    if (candidate < Short.MAX_VALUE) {
+                        candidate++;
+                    }
+                }
+                if (!seeded.isEmpty()) {
+                    insertStatement.executeBatch();
+                }
+            }
+            connection.commit();
+            return seeded;
+        } catch (SQLException e) {
+            throw new IOException("Failed to seed wild resources for village", e);
         }
     }
 
@@ -1532,8 +1806,8 @@ public class NordDatabase {
             try (ResultSet rs = statement.executeQuery()) {
                 if (rs.next()) {
                     byte[] stored = nullableBytes(rs.getBytes("height_data"));
-                    byte type = (byte) rs.getInt("type");
-                    byte size = (byte) rs.getInt("size");
+                    byte type = (byte) normalizeVillageThemeValue(rs.getInt("type"));
+                    byte size = (byte) normalizeVillageBoundsSizeValue(rs.getInt("size"));
                     if (isUsableHeightData(stored, fallbackHeightData)) {
                         return new HeightMapRecord(
                             stored,
@@ -1548,7 +1822,11 @@ public class NordDatabase {
         } catch (SQLException ignored) {
             // Fall back to default.
         }
-        return new HeightMapRecord(fallbackHeightData, (byte) 0, (byte) 0);
+        return new HeightMapRecord(
+            fallbackHeightData,
+            (byte) DEFAULT_VILLAGE_THEME,
+            (byte) DEFAULT_VILLAGE_BOUNDS_SIZE
+        );
     }
 
     public synchronized byte loadVillageTheme(int villageId) {
@@ -1558,31 +1836,57 @@ public class NordDatabase {
             statement.setInt(1, villageId);
             try (ResultSet rs = statement.executeQuery()) {
                 if (rs.next()) {
-                    return (byte) rs.getInt("type");
+                    return (byte) normalizeVillageThemeValue(rs.getInt("type"));
                 }
             }
         } catch (SQLException ignored) {
             // Keep default fallback.
         }
-        return 0;
+        return (byte) DEFAULT_VILLAGE_THEME;
     }
 
     public synchronized void storeHeightMap(int villageId, byte[] heightData, byte type, byte size) throws IOException {
-        String sql =
+        String selectSql = "SELECT type, size FROM village_heightmaps WHERE village_id = ?";
+        String upsertSql =
             "INSERT INTO village_heightmaps (village_id, height_data, type, size) VALUES (?, ?, ?, ?) " +
             "ON CONFLICT(village_id) DO UPDATE SET " +
             "height_data=CASE WHEN length(excluded.height_data) > 0 THEN excluded.height_data ELSE village_heightmaps.height_data END, " +
             "type=excluded.type, size=excluded.size";
-        try (Connection connection = openConnection();
-             PreparedStatement statement = connection.prepareStatement(sql)) {
-            statement.setInt(1, villageId);
-            statement.setBytes(2, nullableBytes(heightData));
-            statement.setInt(3, type);
-            statement.setInt(4, size);
-            statement.executeUpdate();
+        try (Connection connection = openConnection()) {
+            int existingType = DEFAULT_VILLAGE_THEME;
+            int existingSize = DEFAULT_VILLAGE_BOUNDS_SIZE;
+            try (PreparedStatement selectStatement = connection.prepareStatement(selectSql)) {
+                selectStatement.setInt(1, villageId);
+                try (ResultSet rs = selectStatement.executeQuery()) {
+                    if (rs.next()) {
+                        existingType = normalizeVillageThemeValue(rs.getInt("type"));
+                        existingSize = normalizeVillageBoundsSizeValue(rs.getInt("size"));
+                    }
+                }
+            }
+
+            int normalizedType = type >= 0 ? normalizeVillageThemeValue(type) : existingType;
+            int normalizedSize = size > 0 ? size : existingSize;
+            normalizedSize = normalizeVillageBoundsSizeValue(normalizedSize);
+
+            try (PreparedStatement statement = connection.prepareStatement(upsertSql)) {
+                statement.setInt(1, villageId);
+                statement.setBytes(2, nullableBytes(heightData));
+                statement.setInt(3, normalizedType);
+                statement.setInt(4, normalizedSize);
+                statement.executeUpdate();
+            }
         } catch (SQLException e) {
             throw new IOException("Failed to store height map", e);
         }
+    }
+
+    private static int normalizeVillageThemeValue(int theme) {
+        return Math.max(DEFAULT_VILLAGE_THEME, theme);
+    }
+
+    private static int normalizeVillageBoundsSizeValue(int size) {
+        return size > 0 ? size : DEFAULT_VILLAGE_BOUNDS_SIZE;
     }
 
     private static boolean isUsableHeightData(byte[] data, byte[] fallbackHeightData) {
@@ -2609,6 +2913,39 @@ public class NordDatabase {
                 "size INTEGER NOT NULL DEFAULT 0" +
                 ")"
             );
+            statement.execute("INSERT OR IGNORE INTO counters(name, value) VALUES ('village_heightmap_bounds_backfill_done', 0)");
+            int villageHeightMapBackfillDone = 0;
+            try (ResultSet rs = statement.executeQuery(
+                "SELECT value FROM counters WHERE name = 'village_heightmap_bounds_backfill_done'"
+            )) {
+                if (rs.next()) {
+                    villageHeightMapBackfillDone = rs.getInt(1);
+                }
+            }
+            if (villageHeightMapBackfillDone == 0) {
+                int inserted = statement.executeUpdate(
+                    "INSERT INTO village_heightmaps (village_id, height_data, type, size) " +
+                    "SELECT users.village_id, X'', " + DEFAULT_VILLAGE_THEME + ", " + DEFAULT_VILLAGE_BOUNDS_SIZE + " " +
+                    "FROM users " +
+                    "LEFT JOIN village_heightmaps ON village_heightmaps.village_id = users.village_id " +
+                    "WHERE village_heightmaps.village_id IS NULL"
+                );
+                int repaired = statement.executeUpdate(
+                    "UPDATE village_heightmaps SET " +
+                    "type = CASE WHEN type < 0 THEN " + DEFAULT_VILLAGE_THEME + " ELSE type END, " +
+                    "size = CASE WHEN size <= 0 THEN " + DEFAULT_VILLAGE_BOUNDS_SIZE + " ELSE size END " +
+                    "WHERE type < 0 OR size <= 0"
+                );
+                if (inserted > 0 || repaired > 0) {
+                    System.out.println(
+                        "[Server] Backfilled village heightmaps: inserted=" + inserted +
+                        " repaired=" + repaired
+                    );
+                }
+                statement.executeUpdate(
+                    "UPDATE counters SET value = 1 WHERE name = 'village_heightmap_bounds_backfill_done'"
+                );
+            }
 
             statement.execute(
                 "CREATE TABLE IF NOT EXISTS avatar_state (" +

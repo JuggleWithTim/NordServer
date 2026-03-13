@@ -75,8 +75,8 @@ import javax.crypto.spec.PBEKeySpec;
 import javax.crypto.spec.PBEParameterSpec;
 
 public class NordServer {
-    private static final int TCP_PORT = 41210;
-    private static final int UDP_PORT = 41211;
+    private static final int TCP_PORT = Integer.getInteger("nord.tcp.port", 41210);
+    private static final int UDP_PORT = Integer.getInteger("nord.udp.port", 41211);
 
     private static final int LOGIN_FAILED_RESPONSE_CODE = 1;
     private static final int CREATE_ACCOUNT_USERNAME_TAKEN = 1;
@@ -112,12 +112,15 @@ public class NordServer {
     private static final int ADMIN_POPUP_QUEUE_BATCH_LIMIT = 32;
     private static final long ADMIN_POPUP_QUEUE_POLL_INTERVAL_MS = 500L;
     private static final long RESOURCE_RESPAWN_SCAN_INTERVAL_MS = 1500L;
+    private static final long RESOURCE_SEED_SCAN_INTERVAL_MS = 5000L;
     private static final long DEFAULT_WILD_RESOURCE_RESPAWN_DELAY_MS = TimeUnit.MINUTES.toMillis(30L);
+    private static final int DEFAULT_WILD_RESOURCE_SEED_COUNT = 48;
     private static final short DEFAULT_AVATAR_POS_X = 0;
     private static final short DEFAULT_AVATAR_POS_Z = 0;
     private static final short DEFAULT_AVATAR_ROTATION = 0;
     private static final long[] INITIAL_AVATAR_MOVE_RETRY_DELAYS_MS = new long[] {350L, 1000L, 2200L};
     private static final Pattern BUILDING_TAG_PATTERN = Pattern.compile("<BUILDING\\b[^>]*>", Pattern.CASE_INSENSITIVE);
+    private static final Pattern THEME_TAG_PATTERN = Pattern.compile("<THEME\\b[^>]*>", Pattern.CASE_INSENSITIVE);
     private static final Pattern HORSE_TAG_PATTERN = Pattern.compile("<HORSE\\b[^>]*>", Pattern.CASE_INSENSITIVE);
     private static final Pattern PET_TAG_PATTERN = Pattern.compile("<PET\\b[^>]*>", Pattern.CASE_INSENSITIVE);
     private static final Pattern RECIPE_TAG_PATTERN = Pattern.compile("<RECIPE\\b[^>]*>", Pattern.CASE_INSENSITIVE);
@@ -146,6 +149,7 @@ public class NordServer {
     private static final Map<Integer, Integer> ACTIVE_VILLAGE_BY_CONNECTION = new ConcurrentHashMap<>();
     private static final Map<Integer, Map<Integer, Connection>> VILLAGE_CONNECTIONS = new ConcurrentHashMap<>();
     private static final Map<Integer, Long> LAST_RESOURCE_RESPAWN_SCAN_BY_VILLAGE = new ConcurrentHashMap<>();
+    private static final Map<Integer, Long> LAST_RESOURCE_SEED_SCAN_BY_VILLAGE = new ConcurrentHashMap<>();
     private static final Map<Integer, Integer> LAST_BUILDINGS_SYNC_VILLAGE_BY_CONNECTION = new ConcurrentHashMap<>();
     private static final Map<Integer, AvatarPosition> AVATAR_POSITIONS_BY_PLAYER = new ConcurrentHashMap<>();
     private static final Map<String, Integer> UNHANDLED_MESSAGE_COUNTS = new ConcurrentHashMap<>();
@@ -170,6 +174,9 @@ public class NordServer {
     private static volatile Map<Short, Integer> BUILDING_REQUIRED_INGREDIENT_COUNT_BY_TYPE = Collections.emptyMap();
     private static volatile Set<Short> BUILDING_GIFT_TYPE_IDS = Collections.emptySet();
     private static volatile Set<Short> RESOURCE_HARVEST_BUILDING_TYPE_IDS = Collections.emptySet();
+    private static volatile Map<Byte, Short> THEME_WILD_RESOURCE_BUILDING_TYPE_BY_THEME_ID = Collections.emptyMap();
+    private static volatile Map<Short, ArrayList<NordDatabase.ResourcePlacement>> WILD_RESOURCE_PLACEMENTS_BY_TYPE = Collections.emptyMap();
+    private static volatile ArrayList<NordDatabase.ResourcePlacement> FALLBACK_WILD_RESOURCE_PLACEMENTS = new ArrayList<>();
     private static volatile Map<Short, CompanionCatalogEntry> MOUNT_CATALOG_BY_TYPE = Collections.emptyMap();
     private static volatile Map<Short, CompanionCatalogEntry> PET_CATALOG_BY_TYPE = Collections.emptyMap();
     private static volatile int LEVEL_UP_REWARD_BASE_CREDITS = DEFAULT_LEVEL_UP_REWARD_BASE_CREDITS;
@@ -202,17 +209,20 @@ public class NordServer {
         final Map<Short, Integer> requiredIngredientCountsByType;
         final Set<Short> giftBuildingTypes;
         final Set<Short> resourceHarvestBuildingTypes;
+        final Map<Byte, Short> themeWildResourceBuildingTypeByThemeId;
 
         private BuildingEconomyCatalog(Map<Short, Integer> pricesByType,
                                        Map<Short, TreasureType> treasureTypesByType,
                                        Map<Short, Integer> requiredIngredientCountsByType,
                                        Set<Short> giftBuildingTypes,
-                                       Set<Short> resourceHarvestBuildingTypes) {
+                                       Set<Short> resourceHarvestBuildingTypes,
+                                       Map<Byte, Short> themeWildResourceBuildingTypeByThemeId) {
             this.pricesByType = pricesByType;
             this.treasureTypesByType = treasureTypesByType;
             this.requiredIngredientCountsByType = requiredIngredientCountsByType;
             this.giftBuildingTypes = giftBuildingTypes;
             this.resourceHarvestBuildingTypes = resourceHarvestBuildingTypes;
+            this.themeWildResourceBuildingTypeByThemeId = themeWildResourceBuildingTypeByThemeId;
         }
     }
 
@@ -322,6 +332,45 @@ public class NordServer {
         return map;
     }
 
+    private static void registerMissingPointWalkMessageClasses(Kryo kryo) {
+        kryo.register(
+            RequestPointWalkQuestionStatisticsMessage.class,
+            new com.esotericsoftware.kryo.serialize.FieldSerializer(kryo, RequestPointWalkQuestionStatisticsMessage.class)
+        );
+        kryo.register(
+            RequestPointWalkVillageAnswersForPlayerMessage.class,
+            new com.esotericsoftware.kryo.serialize.FieldSerializer(kryo, RequestPointWalkVillageAnswersForPlayerMessage.class)
+        );
+        kryo.register(
+            RequestPointWalkVillageHighscoreMessage.class,
+            new com.esotericsoftware.kryo.serialize.FieldSerializer(kryo, RequestPointWalkVillageHighscoreMessage.class)
+        );
+        kryo.register(
+            StorePointWalkAnswerMessage.class,
+            new com.esotericsoftware.kryo.serialize.FieldSerializer(kryo, StorePointWalkAnswerMessage.class)
+        );
+        kryo.register(
+            RemoveAllPointWalkAnswersInOwnVillageMessage.class,
+            new com.esotericsoftware.kryo.serialize.FieldSerializer(kryo, RemoveAllPointWalkAnswersInOwnVillageMessage.class)
+        );
+        kryo.register(
+            RequestPointWalkQuestionStatisticsResponseMessage.class,
+            new com.esotericsoftware.kryo.serialize.FieldSerializer(kryo, RequestPointWalkQuestionStatisticsResponseMessage.class)
+        );
+        kryo.register(
+            RequestPointWalkVillageAnswersForPlayerResponseMessage.class,
+            new com.esotericsoftware.kryo.serialize.FieldSerializer(kryo, RequestPointWalkVillageAnswersForPlayerResponseMessage.class)
+        );
+        kryo.register(
+            RequestPointWalkVillageHighscoreResponseMessage.class,
+            new com.esotericsoftware.kryo.serialize.FieldSerializer(kryo, RequestPointWalkVillageHighscoreResponseMessage.class)
+        );
+        kryo.register(
+            PointWalkAnswersRemovedNotificationMessage.class,
+            new com.esotericsoftware.kryo.serialize.FieldSerializer(kryo, PointWalkAnswersRemovedNotificationMessage.class)
+        );
+    }
+
     private static byte[] resolveHeightMapFallbackForVillage(int villageId) {
         if (villageId <= 0 || DATABASE == null) {
             return DEFAULT_HEIGHTMAP;
@@ -404,6 +453,12 @@ public class NordServer {
         Set<Short> giftBuildingTypes = Collections.unmodifiableSet(new LinkedHashSet<>(economyCatalog.giftBuildingTypes));
         Set<Short> resourceHarvestBuildingTypes =
             Collections.unmodifiableSet(new LinkedHashSet<>(economyCatalog.resourceHarvestBuildingTypes));
+        Map<Byte, Short> themeWildResourceBuildingTypeByThemeId =
+            Collections.unmodifiableMap(new HashMap<>(economyCatalog.themeWildResourceBuildingTypeByThemeId));
+        Map<Short, ArrayList<NordDatabase.ResourcePlacement>> wildResourcePlacementsByType =
+            Collections.unmodifiableMap(buildWildResourcePlacementsByType(resourceHarvestBuildingTypes));
+        ArrayList<NordDatabase.ResourcePlacement> fallbackWildResourcePlacements =
+            buildFallbackWildResourcePlacements(wildResourcePlacementsByType);
         Map<Short, CompanionCatalogEntry> mountCatalogByType =
             Collections.unmodifiableMap(new HashMap<>(companionCatalog.mountsByType));
         Map<Short, CompanionCatalogEntry> petCatalogByType =
@@ -413,12 +468,16 @@ public class NordServer {
         BUILDING_REQUIRED_INGREDIENT_COUNT_BY_TYPE = buildingRequiredIngredientCounts;
         BUILDING_GIFT_TYPE_IDS = giftBuildingTypes;
         RESOURCE_HARVEST_BUILDING_TYPE_IDS = resourceHarvestBuildingTypes;
+        THEME_WILD_RESOURCE_BUILDING_TYPE_BY_THEME_ID = themeWildResourceBuildingTypeByThemeId;
+        WILD_RESOURCE_PLACEMENTS_BY_TYPE = wildResourcePlacementsByType;
+        FALLBACK_WILD_RESOURCE_PLACEMENTS = fallbackWildResourcePlacements;
         MOUNT_CATALOG_BY_TYPE = mountCatalogByType;
         PET_CATALOG_BY_TYPE = petCatalogByType;
         DATABASE.setBuildingBasePrices(buildingPrices);
         log("[Server] Loaded ingredient requirements for " + BUILDING_REQUIRED_INGREDIENT_COUNT_BY_TYPE.size() + " building type(s)");
         log("[Server] Loaded wild resource building types: " + RESOURCE_HARVEST_BUILDING_TYPE_IDS.size() +
             " (fallback respawn delay=" + WILD_RESOURCE_RESPAWN_DELAY_MS + "ms)");
+        log("[Server] Loaded theme wild resource mapping for " + THEME_WILD_RESOURCE_BUILDING_TYPE_BY_THEME_ID.size() + " theme(s)");
         try {
             int restoredWildResources = DATABASE.restoreStuckResourceCooldownRows(RESOURCE_HARVEST_BUILDING_TYPE_IDS);
             if (restoredWildResources > 0) {
@@ -427,11 +486,13 @@ public class NordServer {
         } catch (IOException e) {
             log("[Server] Failed restoring stuck wild resource cooldown rows: " + e.getMessage());
         }
+        seedMissingWildResourcesAcrossKnownVillages();
 
         Log.set(Log.LEVEL_INFO);
         Server server = new Server(524288, 524288);
         Kryo kryo = server.getKryo();
         JGNMessages.registerJGNMessageClasses(kryo);
+        registerMissingPointWalkMessageClasses(kryo);
 
         server.addListener(new Listener() {
             @Override
@@ -796,6 +857,11 @@ public class NordServer {
                 return;
             }
             byte[] heightData = safeBytes(m.getHeightData());
+            log("[Server] StoreHeightMap userId=" + authenticatedUser.userId +
+                " villageId=" + villageId +
+                " type=" + m.getType() +
+                " size=" + m.getSize() +
+                " bytes=" + heightData.length);
             try {
                 DATABASE.storeHeightMap(villageId, heightData, m.getType(), m.getSize());
             } catch (IOException e) {
@@ -908,6 +974,35 @@ public class NordServer {
             }
             if (villageId != 0 && !isConnectionInVillage(connection, villageId)) {
                 joinVillage(connection, villageId);
+            }
+            Building existing = findBuilding(villageId, m.getBuildingID());
+            boolean normalizeWildResourceCooldown =
+                existing != null &&
+                RESOURCE_HARVEST_BUILDING_TYPE_IDS.contains(existing.getBuildingType()) &&
+                !m.isReady() &&
+                m.getDelayStart() <= 0L &&
+                m.getDelayEnd() <= 0L;
+            if (normalizeWildResourceCooldown) {
+                log("[Server] Normalizing zero-cooldown wild resource update userId=" + user.userId +
+                    " villageId=" + villageId +
+                    " buildingId=" + m.getBuildingID() +
+                    " buildingType=" + existing.getBuildingType() +
+                    " consumedIn=" + m.isConsumed());
+                applyBuildingStateDelta(
+                    villageId,
+                    m.getBuildingID(),
+                    m.getData(),
+                    Boolean.FALSE,
+                    m.isPlacedOnMap(),
+                    Boolean.FALSE,
+                    false,
+                    0L,
+                    m.getIngredients()
+                );
+                if (user != null) {
+                    rebroadcastAvatarPositionIfKnown(villageId, user.userId, connection);
+                }
+                return;
             }
             try {
                 DATABASE.applyBuildingUpdate(
@@ -3009,6 +3104,7 @@ public class NordServer {
         if (villageConnections.isEmpty()) {
             VILLAGE_CONNECTIONS.remove(villageId);
             LAST_RESOURCE_RESPAWN_SCAN_BY_VILLAGE.remove(villageId);
+            LAST_RESOURCE_SEED_SCAN_BY_VILLAGE.remove(villageId);
         }
     }
 
@@ -3162,9 +3258,7 @@ public class NordServer {
         if (villageId <= 0) {
             return;
         }
-        if (!isVillageOwnerOnline(villageId)) {
-            return;
-        }
+        maybeSeedMissingWildResources(villageId, false);
         long now = System.currentTimeMillis();
         long previous = LAST_RESOURCE_RESPAWN_SCAN_BY_VILLAGE.getOrDefault(villageId, 0L);
         if (now - previous < RESOURCE_RESPAWN_SCAN_INTERVAL_MS) {
@@ -3172,12 +3266,51 @@ public class NordServer {
         }
         LAST_RESOURCE_RESPAWN_SCAN_BY_VILLAGE.put(villageId, now);
 
+        ArrayList<Building> restored;
+        try {
+            restored = DATABASE.restoreStuckResourceCooldownRowsInVillage(
+                villageId,
+                RESOURCE_HARVEST_BUILDING_TYPE_IDS
+            );
+        } catch (IOException e) {
+            log("[Server] Failed restoring stuck wild resource cooldown rows in villageId=" + villageId + ": " + e.getMessage());
+            restored = new ArrayList<>();
+        }
+        if (!restored.isEmpty()) {
+            log("[Server] Restored " + restored.size() + " stuck wild resource cooldown row(s) in villageId=" + villageId);
+            for (Building building : restored) {
+                if (building == null) {
+                    continue;
+                }
+                broadcastToVillage(
+                    villageId,
+                    new UpdateBuildingNotificationMessage(
+                        villageId,
+                        building.getBuildingID(),
+                        safeBytes(building.getParameters()),
+                        building.isConsumed(),
+                        building.isPlacedOnMap(),
+                        building.getTileX(),
+                        building.getTileZ(),
+                        building.getRotation(),
+                        true,
+                        building.getDelayStart(),
+                        building.getDelayEnd(),
+                        building.getIngredients()
+                    ),
+                    null,
+                    true,
+                    false
+                );
+            }
+        }
         ArrayList<Building> promoted;
         try {
             promoted = DATABASE.promoteExpiredBuildingCooldowns(
                 villageId,
                 now,
-                BUILDING_REQUIRED_INGREDIENT_COUNT_BY_TYPE
+                BUILDING_REQUIRED_INGREDIENT_COUNT_BY_TYPE,
+                RESOURCE_HARVEST_BUILDING_TYPE_IDS
             );
         } catch (IOException e) {
             log("[Server] Failed to promote expired building cooldowns in villageId=" + villageId + ": " + e.getMessage());
@@ -3213,17 +3346,6 @@ public class NordServer {
                 false
             );
         }
-    }
-
-    private static boolean isVillageOwnerOnline(int villageId) {
-        if (villageId <= 0) {
-            return false;
-        }
-        NordDatabase.UserRecord owner = DATABASE.findByVillageId(villageId);
-        if (owner == null || owner.userId <= 0) {
-            return false;
-        }
-        return findConnectionByPlayerId(owner.userId) != null;
     }
 
     private static PlayerDirectoryData buildPlayerDirectoryData(boolean onlyVillage, int villageIdFilter) {
@@ -3352,6 +3474,9 @@ public class NordServer {
         byte nextTileZ = existing.getTileZ();
         byte nextRotation = existing.getRotation();
         boolean nextReady = ready != null ? ready : existing.isReady();
+        if (nextReady && RESOURCE_HARVEST_BUILDING_TYPE_IDS.contains(existing.getBuildingType())) {
+            nextConsumed = false;
+        }
         long now = System.currentTimeMillis();
         long previousDelayStart = existing.getDelayStart();
         long previousDelayEnd = existing.getDelayEnd();
@@ -4094,12 +4219,13 @@ public class NordServer {
             if (!loaded.pricesByType.isEmpty() ||
                 !loaded.treasureTypesByType.isEmpty() ||
                 !loaded.giftBuildingTypes.isEmpty() ||
-                !loaded.resourceHarvestBuildingTypes.isEmpty()) {
+                !loaded.resourceHarvestBuildingTypes.isEmpty() ||
+                !loaded.themeWildResourceBuildingTypeByThemeId.isEmpty()) {
                 log("[Server] Loaded building economy data from " + candidate.toAbsolutePath());
                 return loaded;
             }
         }
-        return new BuildingEconomyCatalog(new HashMap<>(), new HashMap<>(), new HashMap<>(), new HashSet<>(), new HashSet<>());
+        return new BuildingEconomyCatalog(new HashMap<>(), new HashMap<>(), new HashMap<>(), new HashSet<>(), new HashSet<>(), new HashMap<>());
     }
 
     private static Set<Path> buildPriceSourceCandidates(Path preferredPath) {
@@ -4126,7 +4252,8 @@ public class NordServer {
                 Collections.emptyMap(),
                 Collections.emptyMap(),
                 Collections.emptySet(),
-                Collections.emptySet()
+                Collections.emptySet(),
+                Collections.emptyMap()
             );
         if (candidate == null || !Files.isRegularFile(candidate)) {
             return empty;
@@ -4137,7 +4264,8 @@ public class NordServer {
             BuildingEconomyCatalog plainParsed = parseBuildingEconomyCatalogFromText(new String(rawBytes, StandardCharsets.UTF_8));
             if (!plainParsed.pricesByType.isEmpty() ||
                 !plainParsed.treasureTypesByType.isEmpty() ||
-                !plainParsed.resourceHarvestBuildingTypes.isEmpty()) {
+                !plainParsed.resourceHarvestBuildingTypes.isEmpty() ||
+                !plainParsed.themeWildResourceBuildingTypeByThemeId.isEmpty()) {
                 return plainParsed;
             }
 
@@ -4160,13 +4288,16 @@ public class NordServer {
         Map<Short, Integer> requiredIngredientCounts = new HashMap<>();
         Set<Short> giftBuildingTypes = new HashSet<>();
         Set<Short> resourceHarvestBuildingTypes = new HashSet<>();
+        Map<String, Short> resourceHarvestBuildingTypeByResourceKey = new HashMap<>();
+        Map<Byte, Short> themeWildResourceBuildingTypeByThemeId = new HashMap<>();
         if (safe(text).isEmpty()) {
             return new BuildingEconomyCatalog(
                 prices,
                 treasureTypes,
                 requiredIngredientCounts,
                 giftBuildingTypes,
-                resourceHarvestBuildingTypes
+                resourceHarvestBuildingTypes,
+                themeWildResourceBuildingTypeByThemeId
             );
         }
         Map<Integer, Integer> ingredientCountByRecipeId = new HashMap<>();
@@ -4200,6 +4331,7 @@ public class NordServer {
             boolean isGiftBuildingType = false;
             boolean isResourceClickBuildingType = false;
             boolean consumeRemovesBuilding = false;
+            String resourceKey = "";
             Matcher attrMatcher = ATTRIBUTE_PATTERN.matcher(tag);
             while (attrMatcher.find()) {
                 String key = safe(attrMatcher.group(1)).toLowerCase(Locale.ROOT);
@@ -4227,6 +4359,8 @@ public class NordServer {
                     if ("remove".equalsIgnoreCase(safe(value).trim())) {
                         consumeRemovesBuilding = true;
                     }
+                } else if ("resource".equals(key)) {
+                    resourceKey = normalizeResourceKey(value);
                 }
             }
             if (buildingType != null && basePrice != null) {
@@ -4244,15 +4378,222 @@ public class NordServer {
             }
             if (buildingType != null && isResourceClickBuildingType && consumeRemovesBuilding) {
                 resourceHarvestBuildingTypes.add(buildingType);
+                if (!resourceKey.isEmpty()) {
+                    resourceHarvestBuildingTypeByResourceKey.putIfAbsent(resourceKey, buildingType);
+                }
             }
+        }
+        Matcher themeTagMatcher = THEME_TAG_PATTERN.matcher(text);
+        while (themeTagMatcher.find()) {
+            String themeTag = themeTagMatcher.group();
+            Integer themeId = null;
+            String themeResourceKey = "";
+            Matcher attrMatcher = ATTRIBUTE_PATTERN.matcher(themeTag);
+            while (attrMatcher.find()) {
+                String key = safe(attrMatcher.group(1)).toLowerCase(Locale.ROOT);
+                String value = attrMatcher.group(2);
+                if ("id".equals(key)) {
+                    themeId = parseNonNegativeIntValue(value);
+                } else if ("resource".equals(key)) {
+                    themeResourceKey = normalizeResourceKey(value);
+                }
+            }
+            if (themeId == null || themeId < 0 || themeId > 255) {
+                continue;
+            }
+            short mappedType = 0;
+            Short mappedFromResourceName = resourceHarvestBuildingTypeByResourceKey.get(themeResourceKey);
+            if (mappedFromResourceName != null) {
+                mappedType = mappedFromResourceName;
+            } else {
+                Short parsedType = parseShortValue(themeResourceKey);
+                if (parsedType != null) {
+                    mappedType = parsedType;
+                }
+            }
+            if (mappedType <= 0) {
+                continue;
+            }
+            themeWildResourceBuildingTypeByThemeId.put((byte) (int) themeId, mappedType);
         }
         return new BuildingEconomyCatalog(
             prices,
             treasureTypes,
             requiredIngredientCounts,
             giftBuildingTypes,
-            resourceHarvestBuildingTypes
+            resourceHarvestBuildingTypes,
+            themeWildResourceBuildingTypeByThemeId
         );
+    }
+
+    private static void seedMissingWildResourcesAcrossKnownVillages() {
+        if (RESOURCE_HARVEST_BUILDING_TYPE_IDS.isEmpty()) {
+            return;
+        }
+        int seededVillages = 0;
+        HashSet<Integer> villageIds = new HashSet<>();
+        for (NordDatabase.UserRecord user : DATABASE.getAllUsers()) {
+            if (user == null || user.villageId <= 0) {
+                continue;
+            }
+            villageIds.add(user.villageId);
+        }
+        for (Integer villageId : villageIds) {
+            if (villageId == null || villageId <= 0) {
+                continue;
+            }
+            if (maybeSeedMissingWildResources(villageId, true)) {
+                seededVillages++;
+            }
+        }
+        if (seededVillages > 0) {
+            log("[Server] Seeded missing wild resources in " + seededVillages + " village(s) during startup backfill");
+        }
+    }
+
+    private static boolean maybeSeedMissingWildResources(int villageId, boolean forceScan) {
+        if (villageId <= 0 || RESOURCE_HARVEST_BUILDING_TYPE_IDS.isEmpty()) {
+            return false;
+        }
+        long now = System.currentTimeMillis();
+        if (!forceScan) {
+            long previous = LAST_RESOURCE_SEED_SCAN_BY_VILLAGE.getOrDefault(villageId, 0L);
+            if (now - previous < RESOURCE_SEED_SCAN_INTERVAL_MS) {
+                return false;
+            }
+        }
+        LAST_RESOURCE_SEED_SCAN_BY_VILLAGE.put(villageId, now);
+
+        short seedBuildingType = resolveWildResourceBuildingTypeForVillage(villageId);
+        if (seedBuildingType <= 0) {
+            return false;
+        }
+        ArrayList<NordDatabase.ResourcePlacement> placements = WILD_RESOURCE_PLACEMENTS_BY_TYPE.get(seedBuildingType);
+        if (placements == null || placements.isEmpty()) {
+            placements = FALLBACK_WILD_RESOURCE_PLACEMENTS;
+        }
+        if (placements == null || placements.isEmpty()) {
+            return false;
+        }
+        try {
+            ArrayList<Building> seeded = DATABASE.seedVillageWildResourcesIfMissing(
+                villageId,
+                seedBuildingType,
+                placements,
+                RESOURCE_HARVEST_BUILDING_TYPE_IDS
+            );
+            if (seeded.isEmpty()) {
+                return false;
+            }
+            log("[Server] Seeded " + seeded.size() + " wild resource(s) in villageId=" + villageId +
+                " using buildingType=" + seedBuildingType);
+            return true;
+        } catch (IOException e) {
+            log("[Server] Failed seeding wild resources in villageId=" + villageId + ": " + e.getMessage());
+            return false;
+        }
+    }
+
+    private static short resolveWildResourceBuildingTypeForVillage(int villageId) {
+        if (villageId <= 0) {
+            return 0;
+        }
+        byte themeId = resolveVillageTheme(villageId);
+        Short mapped = THEME_WILD_RESOURCE_BUILDING_TYPE_BY_THEME_ID.get(themeId);
+        if (mapped != null && RESOURCE_HARVEST_BUILDING_TYPE_IDS.contains(mapped)) {
+            return mapped;
+        }
+        return resolveDefaultWildResourceBuildingType();
+    }
+
+    private static short resolveDefaultWildResourceBuildingType() {
+        short selected = 0;
+        for (Short type : RESOURCE_HARVEST_BUILDING_TYPE_IDS) {
+            if (type == null || type <= 0) {
+                continue;
+            }
+            if (selected == 0 || type < selected) {
+                selected = type;
+            }
+        }
+        return selected;
+    }
+
+    private static Map<Short, ArrayList<NordDatabase.ResourcePlacement>> buildWildResourcePlacementsByType(Set<Short> resourceHarvestBuildingTypes) {
+        HashMap<Short, ArrayList<NordDatabase.ResourcePlacement>> placementsByType = new HashMap<>();
+        if (resourceHarvestBuildingTypes == null || resourceHarvestBuildingTypes.isEmpty()) {
+            return placementsByType;
+        }
+        for (Short buildingType : resourceHarvestBuildingTypes) {
+            if (buildingType == null || buildingType <= 0) {
+                continue;
+            }
+            ArrayList<NordDatabase.ResourcePlacement> loaded = DATABASE.loadResourcePlacementsForType(buildingType);
+            ArrayList<NordDatabase.ResourcePlacement> normalized = copyAndLimitPlacements(loaded, DEFAULT_WILD_RESOURCE_SEED_COUNT);
+            if (normalized.isEmpty()) {
+                continue;
+            }
+            placementsByType.put(buildingType, normalized);
+        }
+        return placementsByType;
+    }
+
+    private static ArrayList<NordDatabase.ResourcePlacement> buildFallbackWildResourcePlacements(
+        Map<Short, ArrayList<NordDatabase.ResourcePlacement>> placementsByType) {
+        ArrayList<NordDatabase.ResourcePlacement> selected = new ArrayList<>();
+        if (placementsByType != null && !placementsByType.isEmpty()) {
+            for (ArrayList<NordDatabase.ResourcePlacement> placements : placementsByType.values()) {
+                if (placements == null || placements.isEmpty()) {
+                    continue;
+                }
+                if (placements.size() > selected.size()) {
+                    selected = copyAndLimitPlacements(placements, DEFAULT_WILD_RESOURCE_SEED_COUNT);
+                }
+            }
+        }
+        if (!selected.isEmpty()) {
+            return selected;
+        }
+        return buildGeneratedFallbackWildResourcePlacements(DEFAULT_WILD_RESOURCE_SEED_COUNT);
+    }
+
+    private static ArrayList<NordDatabase.ResourcePlacement> buildGeneratedFallbackWildResourcePlacements(int maxCount) {
+        ArrayList<NordDatabase.ResourcePlacement> generated = new ArrayList<>();
+        int cappedCount = Math.max(0, maxCount);
+        if (cappedCount == 0) {
+            return generated;
+        }
+        int[] ring = new int[] {-88, -72, -56, -40, -24, -8, 8, 24, 40, 56, 72, 88};
+        for (int tileX : ring) {
+            for (int tileZ : ring) {
+                if (Math.abs(tileX) <= 24 && Math.abs(tileZ) <= 24) {
+                    continue;
+                }
+                generated.add(new NordDatabase.ResourcePlacement((byte) tileX, (byte) tileZ, (byte) 0));
+                if (generated.size() >= cappedCount) {
+                    return generated;
+                }
+            }
+        }
+        return generated;
+    }
+
+    private static ArrayList<NordDatabase.ResourcePlacement> copyAndLimitPlacements(
+        ArrayList<NordDatabase.ResourcePlacement> source,
+        int maxCount) {
+        ArrayList<NordDatabase.ResourcePlacement> copy = new ArrayList<>();
+        if (source == null || source.isEmpty() || maxCount <= 0) {
+            return copy;
+        }
+        int limit = Math.min(source.size(), maxCount);
+        for (int i = 0; i < limit; i++) {
+            NordDatabase.ResourcePlacement placement = source.get(i);
+            if (placement == null) {
+                continue;
+            }
+            copy.add(new NordDatabase.ResourcePlacement(placement.tileX, placement.tileZ, placement.rotation));
+        }
+        return copy;
     }
 
     private static CompanionCatalog loadCompanionCatalog(Path preferredPath) {
@@ -4427,6 +4768,10 @@ public class NordServer {
             return 0;
         }
         return parsed;
+    }
+
+    private static String normalizeResourceKey(String value) {
+        return safe(value).trim().toLowerCase(Locale.ROOT);
     }
 
     private static boolean isCompanionSeasonAvailable(CompanionCatalogEntry entry, LocalDate today) {
