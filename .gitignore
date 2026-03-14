@@ -1,0 +1,25 @@
+# Runtime database and logs
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+server.log
+web.log
+*.log
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Java build output
+*.class
+
+# Runtime artifacts
+uploads/
+soak-runs/
+
+# Admin panel local state
+admin-panel/node_modules/
+admin-panel/.env
+
+# Client-derived resource (keep local, do not commit)
+randomseed.dat
