@@ -99,6 +99,12 @@ public class NordServer {
     private static final short ACHIEVEMENT_VIP_TYPE = 0;
     private static final short ACHIEVEMENT_ADMIN_TYPE = 1;
     private static final short ACHIEVEMENT_MODERATOR_TYPE = 2;
+    private static final short WEATHER_ACHIEVEMENT_RAIN_CATEGORY = com.nordclientpc.qi.RAIN.getCategory();
+    private static final short WEATHER_ACHIEVEMENT_SUNSHINE_CATEGORY = com.nordclientpc.qi.SUNSHINE.getCategory();
+    private static final short WEATHER_ACHIEVEMENT_LIGHTNING_CATEGORY = com.nordclientpc.qi.LIGHTNING.getCategory();
+    private static final short WEATHER_ACHIEVEMENT_CANONICAL_TYPE = 0;
+    private static final int BADGE_CATEGORY_TYPE_KEY_MULTIPLIER = 10000;
+    private static final int BADGE_CATEGORY_ONLY_KEY_MULTIPLIER = 1000;
     private static final String CHAT_COMMAND_SET_COINS = "setcoins";
     private static final String CHAT_COMMAND_SET_LEVEL = "setlevel";
     private static final String CHAT_COMMAND_PERMISSION_EVERYONE = "everyone";
@@ -2540,23 +2546,48 @@ public class NordServer {
                 return;
             }
             try {
+                boolean add = m.getAlterMethod() == com.nordclientpc.ZB.ADD;
                 int value = DATABASE.applyAchievementDelta(
                     playerId,
                     m.getCategory(),
                     m.getType(),
                     m.getChangeAmount(),
-                    m.getAlterMethod() == com.nordclientpc.ZB.ADD
+                    add
                 );
+                int canonicalWeatherValue = value;
+                if (isWeatherAchievementCategory(m.getCategory()) &&
+                    m.getType() != WEATHER_ACHIEVEMENT_CANONICAL_TYPE) {
+                    // Weather action availability reads the category key without subtype (type 0).
+                    // Mirror subtype updates into canonical type so circle-menu weather stays usable.
+                    canonicalWeatherValue = DATABASE.applyAchievementDelta(
+                        playerId,
+                        m.getCategory(),
+                        WEATHER_ACHIEVEMENT_CANONICAL_TYPE,
+                        m.getChangeAmount(),
+                        add
+                    );
+                }
                 connection.sendTCP(new AchievementNotificationMessage(
                     playerId,
                     m.getCategory(),
                     m.getType(),
                     toShortClamp(value)
                 ));
+                if (isWeatherAchievementCategory(m.getCategory())) {
+                    if (m.getType() != WEATHER_ACHIEVEMENT_CANONICAL_TYPE) {
+                        connection.sendTCP(new AchievementNotificationMessage(
+                            playerId,
+                            m.getCategory(),
+                            WEATHER_ACHIEVEMENT_CANONICAL_TYPE,
+                            toShortClamp(canonicalWeatherValue)
+                        ));
+                    }
+                    connection.sendTCP(new RequestBadgeDataResponseMessage(playerId, buildBadgeDataForPlayer(playerId)));
+                }
                 log("[Server] AlterAchievement playerId=" + playerId +
                     " category=" + m.getCategory() +
                     " type=" + m.getType() +
-                    " add=" + (m.getAlterMethod() == com.nordclientpc.ZB.ADD) +
+                    " add=" + add +
                     " change=" + m.getChangeAmount() +
                     " storedValue=" + value);
             } catch (IOException e) {
@@ -4432,17 +4463,36 @@ public class NordServer {
         }
 
         boolean hasVip = false;
+        HashMap<Short, Integer> weatherCountByCategory = new HashMap<>();
         ArrayList<NordDatabase.AchievementRecord> achievements = DATABASE.loadAchievements(playerId);
         for (NordDatabase.AchievementRecord achievement : achievements) {
-            int key = (achievement.category * 10000) + achievement.type;
+            int key = (achievement.category * BADGE_CATEGORY_TYPE_KEY_MULTIPLIER) + achievement.type;
             badgeMap.put(key, new com.nordclientpc.Ul(achievement.value));
+            if (isWeatherAchievementCategory(achievement.category)) {
+                int existing = weatherCountByCategory.getOrDefault(achievement.category, 0);
+                weatherCountByCategory.put(achievement.category, Math.max(existing, achievement.value));
+            }
             if (achievement.category == ACHIEVEMENT_ROLE_CATEGORY &&
                 achievement.type == ACHIEVEMENT_VIP_TYPE &&
                 achievement.value > 0) {
                 hasVip = true;
             }
         }
+        for (Map.Entry<Short, Integer> entry : weatherCountByCategory.entrySet()) {
+            short category = entry.getKey();
+            int count = entry.getValue();
+            int weatherCategoryOnlyKey = category * BADGE_CATEGORY_ONLY_KEY_MULTIPLIER;
+            int weatherCategoryTypeZeroKey = category * BADGE_CATEGORY_TYPE_KEY_MULTIPLIER;
+            badgeMap.put(weatherCategoryOnlyKey, new com.nordclientpc.Ul(count));
+            badgeMap.put(weatherCategoryTypeZeroKey, new com.nordclientpc.Ul(count));
+        }
         return new com.nordclientpc.eM(badgeMap, hasVip);
+    }
+
+    private static boolean isWeatherAchievementCategory(short category) {
+        return category == WEATHER_ACHIEVEMENT_RAIN_CATEGORY ||
+               category == WEATHER_ACHIEVEMENT_SUNSHINE_CATEGORY ||
+               category == WEATHER_ACHIEVEMENT_LIGHTNING_CATEGORY;
     }
 
     private static Path resolveRandomseedPath() {
