@@ -3212,6 +3212,16 @@ class Handler(BaseHTTPRequestHandler):
             self._send_text(200, body)
             return
 
+        # Friend-list UI compatibility endpoints. The client always expects JSON
+        # objects with these exact top-level keys.
+        if path_lower == "/helpers.jsp":
+            self._send_json(200, {"helpers": []})
+            return
+
+        if path_lower == "/moderators.jsp":
+            self._send_json(200, {"moderators": []})
+            return
+
         if path.startswith("/track/"):
             query_data = query.get("data", [""])[0]
             with db_connect() as conn:

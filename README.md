@@ -97,6 +97,10 @@ Logs:
 - `NORD_DYNAMIC_EVENTS_XML_INLINE`
 - `NORD_HTTP_TRACE_UNKNOWN`
 - `NORD_HTTP_TRACE_BODY_LIMIT`
+- `NORD_HTTP_WATCHDOG_HEALTHCHECK` (`1` default; `0` disables HTTP probe and only restarts on process exit)
+- `NORD_HTTP_WATCHDOG_INTERVAL_SECONDS` (default `5`)
+- `NORD_HTTP_WATCHDOG_MAX_FAILS` (default `3`)
+- `NORD_HTTP_WATCHDOG_HOST` (optional override for watchdog probe host)
 
 ## HTTP Endpoints (Implemented)
 
@@ -106,6 +110,8 @@ Core compatibility routes:
 - `GET /ServerTime.jsp`
 - `GET /events/dynamic`
 - `GET /clients/tracking.jsp`
+- `GET /helpers.jsp`
+- `GET /moderators.jsp`
 - `GET /track/?data=...`
 - `POST /forum/`
 - `POST /uploadPicture`

@@ -19,12 +19,109 @@ fi
 : >"$SERVER_ROOT/web.log"
 : >"$SERVER_ROOT/server.log"
 
-NORD_HTTP_BIND="${NORD_HTTP_BIND:-0.0.0.0}" \
-NORD_HTTP_PORT="${NORD_HTTP_PORT:-8080}" \
-NORD_DB_PATH="$DB_PATH" \
-stdbuf -oL -eL python3 "$SERVER_ROOT/nord_server.py" >"$SERVER_ROOT/web.log" 2>&1 &
-WEB_PID=$!
-trap 'kill $WEB_PID >/dev/null 2>&1 || true' EXIT
+HTTP_BIND="${NORD_HTTP_BIND:-0.0.0.0}"
+HTTP_PORT="${NORD_HTTP_PORT:-8080}"
+HTTP_WATCHDOG_INTERVAL_SECONDS="${NORD_HTTP_WATCHDOG_INTERVAL_SECONDS:-5}"
+HTTP_WATCHDOG_MAX_FAILS="${NORD_HTTP_WATCHDOG_MAX_FAILS:-3}"
+HTTP_WATCHDOG_HEALTHCHECK="${NORD_HTTP_WATCHDOG_HEALTHCHECK:-1}"
+HTTP_WATCHDOG_HOST="${NORD_HTTP_WATCHDOG_HOST:-}"
+HTTP_PID_FILE="$SERVER_ROOT/http_sidecar.pid"
+
+if [ -z "$HTTP_WATCHDOG_HOST" ]; then
+  case "$HTTP_BIND" in
+    0.0.0.0|::|"")
+      HTTP_WATCHDOG_HOST="127.0.0.1"
+      ;;
+    *)
+      HTTP_WATCHDOG_HOST="$HTTP_BIND"
+      ;;
+  esac
+fi
+
+WEB_PID=0
+WATCHDOG_PID=0
+
+start_http_sidecar() {
+  NORD_HTTP_BIND="$HTTP_BIND" \
+  NORD_HTTP_PORT="$HTTP_PORT" \
+  NORD_DB_PATH="$DB_PATH" \
+  stdbuf -oL -eL python3 "$SERVER_ROOT/nord_server.py" >>"$SERVER_ROOT/web.log" 2>&1 &
+  WEB_PID=$!
+  printf '%s\n' "$WEB_PID" >"$HTTP_PID_FILE"
+  echo "[launcher] HTTP sidecar started (pid=$WEB_PID bind=$HTTP_BIND:$HTTP_PORT)"
+}
+
+http_healthcheck_url() {
+  if [[ "$HTTP_WATCHDOG_HOST" == *:* ]]; then
+    printf "http://[%s]:%s/ServerTime.jsp" "$HTTP_WATCHDOG_HOST" "$HTTP_PORT"
+  else
+    printf "http://%s:%s/ServerTime.jsp" "$HTTP_WATCHDOG_HOST" "$HTTP_PORT"
+  fi
+}
+
+start_http_watchdog() {
+  (
+    local health_url failures
+    health_url="$(http_healthcheck_url)"
+    failures=0
+    while true; do
+      sleep "$HTTP_WATCHDOG_INTERVAL_SECONDS"
+
+      if ! kill -0 "$WEB_PID" >/dev/null 2>&1; then
+        echo "[launcher] HTTP sidecar exited; restarting"
+        start_http_sidecar
+        failures=0
+        continue
+      fi
+
+      if [ "$HTTP_WATCHDOG_HEALTHCHECK" != "1" ]; then
+        continue
+      fi
+
+      if ! command -v curl >/dev/null 2>&1; then
+        continue
+      fi
+
+      if curl -fsS --max-time 3 "$health_url" >/dev/null 2>&1; then
+        failures=0
+        continue
+      fi
+
+      failures=$((failures + 1))
+      if [ "$failures" -lt "$HTTP_WATCHDOG_MAX_FAILS" ]; then
+        continue
+      fi
+
+      echo "[launcher] HTTP sidecar healthcheck failed ${failures} times; restarting"
+      kill "$WEB_PID" >/dev/null 2>&1 || true
+      wait "$WEB_PID" >/dev/null 2>&1 || true
+      start_http_sidecar
+      failures=0
+    done
+  ) &
+  WATCHDOG_PID=$!
+}
+
+cleanup() {
+  if [ "$WATCHDOG_PID" -gt 1 ] 2>/dev/null; then
+    pkill -P "$WATCHDOG_PID" >/dev/null 2>&1 || true
+    kill "$WATCHDOG_PID" >/dev/null 2>&1 || true
+  fi
+  if [ -f "$HTTP_PID_FILE" ]; then
+    HTTP_PID="$(cat "$HTTP_PID_FILE" 2>/dev/null || true)"
+    if [ -n "$HTTP_PID" ] && [ "$HTTP_PID" -gt 1 ] 2>/dev/null; then
+      kill "$HTTP_PID" >/dev/null 2>&1 || true
+    fi
+    rm -f "$HTTP_PID_FILE"
+  fi
+  if [ "$WEB_PID" -gt 1 ] 2>/dev/null; then
+    kill "$WEB_PID" >/dev/null 2>&1 || true
+  fi
+}
+trap cleanup EXIT
+
+start_http_sidecar
+start_http_watchdog
 
 CP="$SERVER_ROOT:$PROJECT_ROOT:$(printf '%s:' "$PROJECT_ROOT"/*.jar)"
 SERVER_ARGS=("--tcp-only")
