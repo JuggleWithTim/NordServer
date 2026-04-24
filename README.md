@@ -1,3 +1,6 @@
+Development of this project has moved to a private repo because it's much easier to work with when the client and server is available in the same repo.
+To follow along with the development and join an active Nord community, check out [NordRevived](https://nordrevived.se/)
+
 # NordServer
 
 Reverse-engineered server for the original Nordgame client.
